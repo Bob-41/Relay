@@ -35,6 +35,8 @@ down.
 
 ### 2. Each laptop (once per laptop)
 
+IMPORTANT: WINDOWS IS IN ALPHA SO DON'T EXPECT IT TO WORK CURRENTLY
+
 Mac or Linux — Terminal. Windows — **Git Bash** (not PowerShell/cmd):
 
 ```bash
