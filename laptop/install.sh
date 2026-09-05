@@ -295,15 +295,32 @@ Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Silent
 Get-CimInstance Win32_Process -Filter "Name='ssh.exe' or Name='sshpass.exe'" |
     Where-Object { $_.CommandLine -and $_.CommandLine.Contains($RemoteHost) } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-$Action   = New-ScheduledTaskAction -Execute $Wrapper
-$Trigger  = New-ScheduledTaskTrigger -AtLogOn
-$Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -DontStopOnIdleEnd -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Force | Out-Null
-Start-ScheduledTask -TaskName $TaskName
+try {
+    $Action   = New-ScheduledTaskAction -Execute $Wrapper
+    $Trigger  = New-ScheduledTaskTrigger -AtLogOn
+    $Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -DontStopOnIdleEnd -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Force -ErrorAction Stop | Out-Null
+    Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    exit 0
+} catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}
 PSEOF
     PS1_WIN="$(cygpath -w "$PS1")"
-    powershell -NoProfile -ExecutionPolicy Bypass -File "$PS1_WIN" -TaskName "$TASK_NAME" -Wrapper "$WIN_WRAPPER_BAT" -RemoteHost "$REMOTE_HOST"
-    echo "Tunnel task '${TASK_NAME}' registered. Log: ${LOG_FILE_WIN}"
+    STARTUP_DIR="$(cygpath -u "$APPDATA")/Microsoft/Windows/Start Menu/Programs/Startup"
+    STARTUP_BAT="${STARTUP_DIR}/adb-tunnel-${SAFE_HOST}.bat"
+    if powershell -NoProfile -ExecutionPolicy Bypass -File "$PS1_WIN" -TaskName "$TASK_NAME" -Wrapper "$WIN_WRAPPER_BAT" -RemoteHost "$REMOTE_HOST"; then
+        echo "Tunnel task '${TASK_NAME}' registered via Scheduled Task. Log: ${LOG_FILE_WIN}"
+        rm -f "$STARTUP_BAT"  # in case an earlier run on this machine fell back to Startup folder
+    else
+        echo "Scheduled Task creation was denied on this machine (needs elevation here) - falling back to Startup-folder persistence."
+        mkdir -p "$STARTUP_DIR"
+        cp "$WRAPPER_BAT" "$STARTUP_BAT"
+        echo "Startup entry installed: ${STARTUP_BAT}"
+        echo "The tunnel will start at your next logon. To start it immediately without logging off, run that file now."
+        echo "NOTE: unlike the Scheduled Task path, if the tunnel's console window gets closed it will NOT auto-restart until next logon."
+    fi
 
     # Register the updater scheduled task (key-auth only), once.
     if [ "$AUTH_CHOICE" = "1" ] && [ "$AUTO" != "1" ]; then
@@ -317,13 +334,23 @@ PSEOF
             cat > "$UPD_PS1" <<'PSEOF'
 param([string]$BashBin, [string]$ScriptPath)
 Unregister-ScheduledTask -TaskName "ADBTunnelUpdater" -Confirm:$false -ErrorAction SilentlyContinue
-$Action   = New-ScheduledTaskAction -Execute $BashBin -Argument "`"$ScriptPath`""
-$Trigger  = New-ScheduledTaskTrigger -Daily -At 3am
-$Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName "ADBTunnelUpdater" -Action $Action -Trigger $Trigger -Settings $Settings -Force | Out-Null
+try {
+    $Action   = New-ScheduledTaskAction -Execute $BashBin -Argument "`"$ScriptPath`""
+    $Trigger  = New-ScheduledTaskTrigger -Daily -At 3am
+    $Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    Register-ScheduledTask -TaskName "ADBTunnelUpdater" -Action $Action -Trigger $Trigger -Settings $Settings -Force -ErrorAction Stop | Out-Null
+    exit 0
+} catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}
 PSEOF
-            powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$UPD_PS1")" -BashBin "$BASH_BIN_WIN" -ScriptPath "$UPDATER_DEST_WIN"
-            echo "Auto-update registered (daily 3am check)."
+            if powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$UPD_PS1")" -BashBin "$BASH_BIN_WIN" -ScriptPath "$UPDATER_DEST_WIN"; then
+                echo "Auto-update registered (daily 3am check)."
+            else
+                echo "Auto-update could not be registered (Scheduled Task creation denied on this machine)."
+                echo "There's no Startup-folder equivalent for a daily check - you'll need to 'git pull' and re-run install.sh manually to pick up fixes."
+            fi
         fi
     fi
     ;;
