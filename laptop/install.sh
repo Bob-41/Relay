@@ -96,7 +96,7 @@ else
             echo "Existing key found at $KEY, reusing it."
         fi
         echo "Copying key to the remote host. You'll be prompted for its password ONCE."
-        if command -v ssh-copy-id >/dev/null 2>&1; then
+        if [ "$PLATFORM" != "windows" ] && command -v ssh-copy-id >/dev/null 2>&1; then
             ssh-copy-id -i "${KEY}.pub" -o StrictHostKeyChecking=accept-new "${REMOTE_USER}@${REMOTE_HOST}"
         else
             PUBKEY="$(cat "${KEY}.pub")"
