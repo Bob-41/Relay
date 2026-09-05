@@ -73,8 +73,8 @@ else
     [ -z "$REMOTE_HOST" ] && { echo "Aborting."; exit 1; }
     read -rp "Remote username: " REMOTE_USER
     [ -z "$REMOTE_USER" ] && { echo "Aborting."; exit 1; }
-    read -rp "Remote adb server port [5037]: " REMOTE_PORT; REMOTE_PORT="${REMOTE_PORT:-5037}"
-    read -rp "Local port to forward to [5037]: " LOCAL_PORT; LOCAL_PORT="${LOCAL_PORT:-5037}"
+    REMOTE_PORT="5037"
+    LOCAL_PORT="5037"
 
     echo ""
     echo "Auth method:"
