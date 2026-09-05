@@ -297,7 +297,7 @@ Get-CimInstance Win32_Process -Filter "Name='ssh.exe' or Name='sshpass.exe'" |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 try {
     $Action   = New-ScheduledTaskAction -Execute $Wrapper
-    $Trigger  = New-ScheduledTaskTrigger -AtLogOn
+    $Trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -DontStopOnIdleEnd -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Force -ErrorAction Stop | Out-Null
     Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
