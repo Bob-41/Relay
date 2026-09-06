@@ -87,12 +87,15 @@ else
     # hardware constant of AP mode, not a per-install variable, same as
     # WEB_REMOTE_PORT below. Not prompted.
     ROBOT_IP="192.168.43.1"
-    read -rp "Local port for the Control Hub web interface (192.168.43.1:8080 on the robot) [8091]: " WEB_LOCAL_PORT
-    WEB_LOCAL_PORT="${WEB_LOCAL_PORT:-8091}"
-    WEB_REMOTE_PORT="8080"
 
-    read -rp "Local port for the Panels dashboard (192.168.43.1:8001 on the robot) [8001]: " PANELS_LOCAL_PORT
-    PANELS_LOCAL_PORT="${PANELS_LOCAL_PORT:-8001}"
+    # Local (laptop-side) forward ports - hardcoded, not prompted, per
+    # explicit request. Trade-off: if a laptop already has something
+    # bound to 8091 or 8001, ExitOnForwardFailure=yes means the WHOLE
+    # tunnel (including the ADB forward) fails to start, and the fix is
+    # editing these values in the script rather than answering a prompt.
+    WEB_LOCAL_PORT="8091"
+    WEB_REMOTE_PORT="8080"
+    PANELS_LOCAL_PORT="8001"
     PANELS_REMOTE_PORT="8001"
 
     echo ""
