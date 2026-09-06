@@ -81,8 +81,10 @@ else
     REMOTE_PORT="5037"
     LOCAL_PORT="5037"
 
-    read -rp "Robot IP as seen from the bridge (Control Hub AP address) [192.168.43.1]: " ROBOT_IP
-    ROBOT_IP="${ROBOT_IP:-192.168.43.1}"
+    # Control Hub AP mode always assigns itself this address - it's a
+    # hardware constant of AP mode, not a per-install variable, same as
+    # WEB_REMOTE_PORT below. Not prompted.
+    ROBOT_IP="192.168.43.1"
     read -rp "Local port for the Control Hub web interface (192.168.43.1:8080 on the robot) [8091]: " WEB_LOCAL_PORT
     WEB_LOCAL_PORT="${WEB_LOCAL_PORT:-8091}"
     WEB_REMOTE_PORT="8080"
