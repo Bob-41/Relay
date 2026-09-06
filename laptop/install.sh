@@ -61,6 +61,8 @@ if [ "$AUTO" = "1" ]; then
     WEB_LOCAL_PORT="${WEB_LOCAL_PORT:-8091}"
     WEB_REMOTE_PORT="${WEB_REMOTE_PORT:-8080}"
     ROBOT_IP="${ROBOT_IP:-192.168.43.1}"
+    PANELS_LOCAL_PORT="${PANELS_LOCAL_PORT:-8001}"
+    PANELS_REMOTE_PORT="${PANELS_REMOTE_PORT:-8001}"
     echo "=== ADB Tunnel auto-update (${REMOTE_HOST}), replaying saved config ==="
     if [ "$AUTH_CHOICE" != "1" ]; then
         echo "Password-auth config found under --auto - this should never happen"
@@ -88,6 +90,10 @@ else
     read -rp "Local port for the Control Hub web interface (192.168.43.1:8080 on the robot) [8091]: " WEB_LOCAL_PORT
     WEB_LOCAL_PORT="${WEB_LOCAL_PORT:-8091}"
     WEB_REMOTE_PORT="8080"
+
+    read -rp "Local port for the Panels dashboard (192.168.43.1:8001 on the robot) [8001]: " PANELS_LOCAL_PORT
+    PANELS_LOCAL_PORT="${PANELS_LOCAL_PORT:-8001}"
+    PANELS_REMOTE_PORT="8001"
 
     echo ""
     echo "Auth method:"
@@ -146,6 +152,8 @@ LOCAL_PORT="${LOCAL_PORT}"
 ROBOT_IP="${ROBOT_IP}"
 WEB_LOCAL_PORT="${WEB_LOCAL_PORT}"
 WEB_REMOTE_PORT="${WEB_REMOTE_PORT}"
+PANELS_LOCAL_PORT="${PANELS_LOCAL_PORT}"
+PANELS_REMOTE_PORT="${PANELS_REMOTE_PORT}"
 AUTH_CHOICE="${AUTH_CHOICE}"
 KEY="${KEY}"
 PASSFILE="${PASSFILE}"
@@ -157,7 +165,7 @@ fi
 SAFE_HOST="${REMOTE_HOST//[^a-zA-Z0-9]/_}"
 
 # --- Port conflict check (same on --auto: catches a stale tunnel before reinstalling) ---
-for CHECK_PORT in "$LOCAL_PORT" "$WEB_LOCAL_PORT"; do
+for CHECK_PORT in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT"; do
     if [ "$PLATFORM" = "windows" ]; then
         if command -v netstat >/dev/null 2>&1 && netstat -ano 2>/dev/null | grep -q ":${CHECK_PORT} .*LISTENING"; then
             echo "NOTE: something is on local port $CHECK_PORT already - expected if the old tunnel is still up; it'll be replaced below. If this is the web-interface port and it's a leftover dev server (Tomcat/webpack/etc. commonly squat 8080), pick a different WEB_LOCAL_PORT instead of assuming it's safe to kill."
@@ -190,6 +198,8 @@ mac)
         <string>${LOCAL_PORT}:localhost:${REMOTE_PORT}</string>
         <string>-L</string>
         <string>${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT}</string>
+        <string>-L</string>
+        <string>${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT}</string>
         <string>${REMOTE_USER}@${REMOTE_HOST}</string>"
     else
         SSHPASS_BIN="$(command -v sshpass)"
@@ -211,6 +221,8 @@ mac)
         <string>${LOCAL_PORT}:localhost:${REMOTE_PORT}</string>
         <string>-L</string>
         <string>${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT}</string>
+        <string>-L</string>
+        <string>${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT}</string>
         <string>${REMOTE_USER}@${REMOTE_HOST}</string>"
     fi
     cat > "$PLIST" <<EOF
@@ -290,7 +302,7 @@ windows)
 @echo off
 :loop
 echo [%date% %time%] starting tunnel to ${REMOTE_HOST} >> "${LOG_FILE_WIN}"
-"${SSH_BIN_WIN}" -i "${WIN_KEY}" -N -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
+"${SSH_BIN_WIN}" -i "${WIN_KEY}" -N -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
 echo [%date% %time%] tunnel exited, restarting in 5s >> "${LOG_FILE_WIN}"
 timeout /t 5 /nobreak >nul
 goto loop
@@ -302,7 +314,7 @@ EOF
 @echo off
 :loop
 echo [%date% %time%] starting tunnel to ${REMOTE_HOST} >> "${LOG_FILE_WIN}"
-"${SSHPASS_BIN_WIN}" -f "${WIN_PASSFILE}" "${SSH_BIN_WIN}" -N -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
+"${SSHPASS_BIN_WIN}" -f "${WIN_PASSFILE}" "${SSH_BIN_WIN}" -N -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
 echo [%date% %time%] tunnel exited, restarting in 5s >> "${LOG_FILE_WIN}"
 timeout /t 5 /nobreak >nul
 goto loop
@@ -381,9 +393,9 @@ linux)
     echo "No auto-start mechanism set up for plain Linux laptops - use a"
     echo "systemd --user unit or cron @reboot to persist this command:"
     if [ "$AUTH_CHOICE" = "1" ]; then
-        echo "  ssh -i $KEY -N -o BatchMode=yes -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST}"
+        echo "  ssh -i $KEY -N -o BatchMode=yes -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST}"
     else
-        echo "  sshpass -f $PASSFILE ssh -N -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST}"
+        echo "  sshpass -f $PASSFILE ssh -N -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST}"
     fi
     echo "Auto-update is not implemented for this path - it's a manual command, not a managed service."
     ;;
@@ -394,5 +406,6 @@ if [ "$AUTO" != "1" ]; then
     echo "=== Done ==="
     echo "adb server should be reachable at localhost:${LOCAL_PORT}."
     echo "Control Hub web interface (Program & Manage) should be reachable at http://localhost:${WEB_LOCAL_PORT}"
+    echo "Panels dashboard (if used) should be reachable at http://localhost:${PANELS_LOCAL_PORT}"
     echo "Quit and reopen Android Studio, confirm the device shows up before deploying."
 fi
