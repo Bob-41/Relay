@@ -18,7 +18,16 @@ if [ "$EUID" -ne 0 ]; then
     echo "Run this with sudo."
     exit 1
 fi
-for bin in systemctl nmcli adb ss; do
+if ! command -v iw >/dev/null 2>&1; then
+    if command -v apt-get >/dev/null 2>&1; then
+        echo "Installing iw so Relay can show Wi-Fi adapter band support..."
+        apt-get install -y iw
+    else
+        echo "iw is required to show Wi-Fi adapter band support. Install it, then re-run this script."
+        exit 1
+    fi
+fi
+for bin in systemctl nmcli adb ss iw; do
     command -v "$bin" >/dev/null 2>&1 || { echo "$bin not found. Aborting."; exit 1; }
 done
 
@@ -33,7 +42,7 @@ SCRIPT_PATH="/usr/local/bin/adb-forwarder-connect.sh"
 # Print a useful label next to each Wi-Fi interface so users do not have to
 # guess which adapter is internal versus an external USB adapter.
 describe_wifi_adapter() {
-    local iface="$1" props device_path bus vendor model label
+    local iface="$1" recommendation="${2:-}" props device_path bus vendor model label bands
     if command -v udevadm >/dev/null 2>&1; then
         props="$(udevadm info --query=property --path="/sys/class/net/${iface}" 2>/dev/null || true)"
     else
@@ -58,7 +67,28 @@ describe_wifi_adapter() {
         pci|platform|mmc|sdio|internal) label="internal Wi-Fi adapter" ;;
         *) label="Wi-Fi adapter" ;;
     esac
-    printf '  %s: %s%s%s\n' "$iface" "${vendor:+${vendor} }" "${model:+${model} }" "$label"
+    bands="$(wifi_band_summary "$iface")"
+    printf '  %s: %s%s%s (%s)%s\n' "$iface" "${vendor:+${vendor} }" "${model:+${model} }" "$label" "$bands" "$recommendation"
+}
+
+wifi_supports_frequency_range() {
+    local iface="$1" min_mhz="$2" max_mhz="$3" phy
+    phy="$(iw dev "$iface" info 2>/dev/null | awk '/wiphy/ { print "phy" $2; exit }')"
+    [ -n "$phy" ] || return 1
+    iw phy "$phy" info 2>/dev/null | awk -v min="$min_mhz" -v max="$max_mhz" \
+        '$2 >= min && $2 < max && $3 == "MHz" { found=1 } END { exit !found }'
+}
+
+wifi_band_summary() {
+    local iface="$1" has_24=0 has_5=0
+    wifi_supports_frequency_range "$iface" 2400 2500 && has_24=1
+    wifi_supports_frequency_range "$iface" 4900 5925 && has_5=1
+    case "${has_24}:${has_5}" in
+        1:1) printf '2.4 GHz and 5 GHz' ;;
+        1:0) printf '2.4 GHz only' ;;
+        0:1) printf '5 GHz only' ;;
+        *) printf 'band support unavailable' ;;
+    esac
 }
 
 if [ "$AUTO" = "1" ]; then
@@ -140,10 +170,22 @@ else
 
     echo ""
     echo "=== Robot Wifi join + shared adb server ==="
+    echo "Control Hubs use 5 GHz by default. Choose a 5 GHz-capable adapter when possible."
     echo "Choose the adapter that can see the robot's Wi-Fi:"
+    WIFI_INTERFACES=()
+    FIVE_GHZ_INTERFACES=()
     while IFS=: read -r iface type; do
-        [ "$type" = "wifi" ] && describe_wifi_adapter "$iface"
+        [ "$type" = "wifi" ] || continue
+        WIFI_INTERFACES+=("$iface")
+        wifi_supports_frequency_range "$iface" 4900 5925 && FIVE_GHZ_INTERFACES+=("$iface")
     done < <(nmcli -t -f DEVICE,TYPE device)
+    for iface in "${WIFI_INTERFACES[@]}"; do
+        recommendation=""
+        if [ "${#FIVE_GHZ_INTERFACES[@]}" -eq 1 ] && [ "$iface" = "${FIVE_GHZ_INTERFACES[0]}" ]; then
+            recommendation=" — recommended: only 5 GHz-capable adapter"
+        fi
+        describe_wifi_adapter "$iface" "$recommendation"
+    done
     read -rp "WiFi interface to join the robot wifi: " WIFI_IFACE
     [ -z "$WIFI_IFACE" ] && { echo "Aborting."; exit 1; }
     read -rp "Robot wifi SSID: " TARGET_SSID
