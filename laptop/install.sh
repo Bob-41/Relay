@@ -63,6 +63,12 @@ if [ "$AUTO" = "1" ]; then
     ROBOT_IP="${ROBOT_IP:-192.168.43.1}"
     PANELS_LOCAL_PORT="${PANELS_LOCAL_PORT:-8001}"
     PANELS_REMOTE_PORT="${PANELS_REMOTE_PORT:-8001}"
+    # Panels' live-data WebSocket runs on a separate fixed port from its HTTP
+    # port (8001) - without this forward the page shell loads but the
+    # dashboard itself never initializes. Defaulted for configs saved before
+    # this forward existed, same pattern as WEB_LOCAL_PORT above.
+    PANELS_WS_LOCAL_PORT="${PANELS_WS_LOCAL_PORT:-8002}"
+    PANELS_WS_REMOTE_PORT="${PANELS_WS_REMOTE_PORT:-8002}"
     echo "=== ADB Tunnel auto-update (${REMOTE_HOST}), replaying saved config ==="
     if [ "$AUTH_CHOICE" != "1" ]; then
         echo "Password-auth config found under --auto - this should never happen"
@@ -97,6 +103,8 @@ else
     WEB_REMOTE_PORT="8080"
     PANELS_LOCAL_PORT="8001"
     PANELS_REMOTE_PORT="8001"
+    PANELS_WS_LOCAL_PORT="8002"
+    PANELS_WS_REMOTE_PORT="8002"
 
     echo ""
     echo "Auth method:"
@@ -157,6 +165,8 @@ WEB_LOCAL_PORT="${WEB_LOCAL_PORT}"
 WEB_REMOTE_PORT="${WEB_REMOTE_PORT}"
 PANELS_LOCAL_PORT="${PANELS_LOCAL_PORT}"
 PANELS_REMOTE_PORT="${PANELS_REMOTE_PORT}"
+PANELS_WS_LOCAL_PORT="${PANELS_WS_LOCAL_PORT}"
+PANELS_WS_REMOTE_PORT="${PANELS_WS_REMOTE_PORT}"
 AUTH_CHOICE="${AUTH_CHOICE}"
 KEY="${KEY}"
 PASSFILE="${PASSFILE}"
@@ -204,7 +214,7 @@ elif command -v lsof >/dev/null 2>&1; then
 fi
 
 # --- Port conflict check for the web-interface forwards (warn-only, never auto-killed) ---
-for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT"; do
+for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
     if [ "$PLATFORM" = "windows" ]; then
         if command -v netstat >/dev/null 2>&1 && netstat -ano 2>/dev/null | grep -q ":${CHECK_PORT} .*LISTENING"; then
             echo "NOTE: something is on local port $CHECK_PORT already - expected if the old tunnel is still up; it'll be replaced below. If this is the web-interface port and it's a leftover dev server (Tomcat/webpack/etc. commonly squat 8080), pick a different WEB_LOCAL_PORT instead of assuming it's safe to kill."
@@ -239,6 +249,8 @@ mac)
         <string>${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT}</string>
         <string>-L</string>
         <string>${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT}</string>
+        <string>-L</string>
+        <string>${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT}</string>
         <string>${REMOTE_USER}@${REMOTE_HOST}</string>"
     else
         SSHPASS_BIN="$(command -v sshpass)"
@@ -262,6 +274,8 @@ mac)
         <string>${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT}</string>
         <string>-L</string>
         <string>${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT}</string>
+        <string>-L</string>
+        <string>${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT}</string>
         <string>${REMOTE_USER}@${REMOTE_HOST}</string>"
     fi
     cat > "$PLIST" <<EOF
@@ -341,7 +355,7 @@ windows)
 @echo off
 :loop
 echo [%date% %time%] starting tunnel to ${REMOTE_HOST} >> "${LOG_FILE_WIN}"
-"${SSH_BIN_WIN}" -i "${WIN_KEY}" -N -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
+"${SSH_BIN_WIN}" -i "${WIN_KEY}" -N -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
 echo [%date% %time%] tunnel exited, restarting in 5s >> "${LOG_FILE_WIN}"
 timeout /t 5 /nobreak >nul
 goto loop
@@ -353,7 +367,7 @@ EOF
 @echo off
 :loop
 echo [%date% %time%] starting tunnel to ${REMOTE_HOST} >> "${LOG_FILE_WIN}"
-"${SSHPASS_BIN_WIN}" -f "${WIN_PASSFILE}" "${SSH_BIN_WIN}" -N -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
+"${SSHPASS_BIN_WIN}" -f "${WIN_PASSFILE}" "${SSH_BIN_WIN}" -N -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
 echo [%date% %time%] tunnel exited, restarting in 5s >> "${LOG_FILE_WIN}"
 timeout /t 5 /nobreak >nul
 goto loop
@@ -432,9 +446,9 @@ linux)
     echo "No auto-start mechanism set up for plain Linux laptops - use a"
     echo "systemd --user unit or cron @reboot to persist this command:"
     if [ "$AUTH_CHOICE" = "1" ]; then
-        echo "  ssh -i $KEY -N -o BatchMode=yes -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST}"
+        echo "  ssh -i $KEY -N -o BatchMode=yes -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST}"
     else
-        echo "  sshpass -f $PASSFILE ssh -N -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST}"
+        echo "  sshpass -f $PASSFILE ssh -N -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST}"
     fi
     echo "Auto-update is not implemented for this path - it's a manual command, not a managed service."
     ;;
@@ -449,7 +463,7 @@ esac
 HEALTH_OK=1
 if [ "$PLATFORM" = "mac" ]; then
     sleep 2
-    for CHECK_PORT in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT"; do
+    for CHECK_PORT in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
         if ! lsof -iTCP:"$CHECK_PORT" -sTCP:LISTEN -P >/dev/null 2>&1; then
             echo "WARNING: port $CHECK_PORT is not listening - tunnel did not come up cleanly."
             HEALTH_OK=0
@@ -457,7 +471,7 @@ if [ "$PLATFORM" = "mac" ]; then
     done
 elif [ "$PLATFORM" = "windows" ]; then
     sleep 3
-    for CHECK_PORT in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT"; do
+    for CHECK_PORT in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
         if command -v netstat >/dev/null 2>&1 && ! netstat -ano 2>/dev/null | grep -q ":${CHECK_PORT} .*LISTENING"; then
             echo "WARNING: port $CHECK_PORT is not listening - tunnel did not come up cleanly."
             HEALTH_OK=0
@@ -482,7 +496,7 @@ else
     else
         echo "=== Setup ran, but the tunnel is NOT confirmed healthy ==="
         echo "One or more forwarded ports never came up. Likely cause: something else is"
-        echo "already bound to one of ${LOCAL_PORT}/${WEB_LOCAL_PORT}/${PANELS_LOCAL_PORT} -"
+        echo "already bound to one of ${LOCAL_PORT}/${WEB_LOCAL_PORT}/${PANELS_LOCAL_PORT}/${PANELS_WS_LOCAL_PORT} -"
         echo "ExitOnForwardFailure kills the WHOLE tunnel if even one forward fails, so the"
         echo "adb forward can be down even though only the web-interface port collided."
         case "$PLATFORM" in
