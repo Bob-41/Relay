@@ -3,7 +3,10 @@
 Shared ADB bridge for FTC (FIRST Tech Challenge) workshops. Relay lets any
 laptop running Android Studio deploy to a REV Control Hub over WiFi through
 one shared bridge machine — no USB, no direct WiFi connection to the robot
-per laptop, and multiple laptops can deploy at the same time.
+per laptop, and multiple laptops can deploy at the same time. If you will 
+use Tailscale, then you can upload to your robot from anywhere in the world 
+as long as you have internet access and the bridge is near the robot. 
+Instructions for Tailscale are down below.
 
 ## How it works
 
@@ -66,6 +69,10 @@ this repo automatically:
 - **Laptop auto-update only applies to SSH-key tunnels.** Password-auth
   tunnels aren't auto-updated; re-run `laptop/install.sh` manually on
   those.
+
+
+
+## Tailscale
 
 ## Logs
 
