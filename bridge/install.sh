@@ -111,8 +111,11 @@ else
     read -rp "Robot wifi SSID: " TARGET_SSID
     [ -z "$TARGET_SSID" ] && { echo "Aborting."; exit 1; }
     read -rsp "Robot wifi password (blank if open): " WIFI_PASS; echo ""
-    read -rp "Device IP [192.168.43.1]: " DEVICE_IP; DEVICE_IP="${DEVICE_IP:-192.168.43.1}"
-    read -rp "Device adb port [5555]: " DEVICE_PORT; DEVICE_PORT="${DEVICE_PORT:-5555}"
+    # Control Hub AP mode always assigns itself 192.168.43.1:5555 - a
+    # hardware constant of AP mode, not a per-installation choice, same
+    # reasoning as ROBOT_IP on the laptop side. Not prompted.
+    DEVICE_IP="192.168.43.1"
+    DEVICE_PORT="5555"
     read -rp "Local adb server port [5037]: " ADB_PORT; ADB_PORT="${ADB_PORT:-5037}"
     LOG_FILE="/var/log/adb-forwarder.log"
  
