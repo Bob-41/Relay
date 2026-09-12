@@ -167,8 +167,44 @@ fi
 
 SAFE_HOST="${REMOTE_HOST//[^a-zA-Z0-9]/_}"
 
-# --- Port conflict check (same on --auto: catches a stale tunnel before reinstalling) ---
-for CHECK_PORT in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT"; do
+# --- Clear a rogue local adb server off LOCAL_PORT before it can block the tunnel ---
+# LOCAL_PORT (default 5037) is ALWAYS supposed to be an adb server - unlike
+# WEB_LOCAL_PORT/PANELS_LOCAL_PORT below, which might legitimately be someone's
+# dev server and must NOT be touched automatically. A local adb server here is
+# most often auto-spawned by Android Studio itself (or left over from a manual
+# `adb` invocation) and is always safe to ask to shut down via `adb kill-server`.
+if [ "$PLATFORM" = "windows" ]; then
+    if command -v netstat >/dev/null 2>&1 && netstat -ano 2>/dev/null | grep -q ":${LOCAL_PORT} .*LISTENING"; then
+        LOCAL_PID="$(netstat -ano 2>/dev/null | awk -v p=":${LOCAL_PORT}" '$0 ~ p && $0 ~ /LISTENING/ {print $NF; exit}')"
+        LOCAL_IMAGE="$(tasklist //FI "PID eq ${LOCAL_PID}" //FO CSV //NH 2>/dev/null | awk -F'","' '{gsub(/"/,"",$1); print $1}')"
+        if [ "$LOCAL_IMAGE" = "adb.exe" ] && command -v adb >/dev/null 2>&1; then
+            echo "Local adb server already on port ${LOCAL_PORT} (PID ${LOCAL_PID}) - shutting it down before starting the tunnel."
+            adb -P "${LOCAL_PORT}" kill-server >/dev/null 2>&1 || true
+            sleep 1
+            netstat -ano 2>/dev/null | grep -q ":${LOCAL_PORT} .*LISTENING" && \
+                echo "WARNING: port ${LOCAL_PORT} still held after kill-server - tunnel setup may fail."
+        else
+            echo "NOTE: something non-adb is on local port ${LOCAL_PORT} (PID ${LOCAL_PID}, image ${LOCAL_IMAGE:-unknown}) - not touching it automatically."
+        fi
+    fi
+elif command -v lsof >/dev/null 2>&1; then
+    LOCAL_PID="$(lsof -tiTCP:"${LOCAL_PORT}" -sTCP:LISTEN -P 2>/dev/null | head -n1)"
+    if [ -n "$LOCAL_PID" ]; then
+        LOCAL_CMD="$(ps -p "$LOCAL_PID" -o comm= 2>/dev/null | xargs -n1 basename 2>/dev/null)"
+        if [ "$LOCAL_CMD" = "adb" ] && command -v adb >/dev/null 2>&1; then
+            echo "Local adb server already on port ${LOCAL_PORT} (PID ${LOCAL_PID}) - shutting it down before starting the tunnel."
+            adb -P "${LOCAL_PORT}" kill-server >/dev/null 2>&1 || true
+            sleep 1
+            lsof -iTCP:"${LOCAL_PORT}" -sTCP:LISTEN -P >/dev/null 2>&1 && \
+                echo "WARNING: port ${LOCAL_PORT} still held after kill-server - tunnel setup may fail."
+        else
+            echo "NOTE: something non-adb is on local port ${LOCAL_PORT} (PID ${LOCAL_PID}, command ${LOCAL_CMD:-unknown}) - not touching it automatically."
+        fi
+    fi
+fi
+
+# --- Port conflict check for the web-interface forwards (warn-only, never auto-killed) ---
+for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT"; do
     if [ "$PLATFORM" = "windows" ]; then
         if command -v netstat >/dev/null 2>&1 && netstat -ano 2>/dev/null | grep -q ":${CHECK_PORT} .*LISTENING"; then
             echo "NOTE: something is on local port $CHECK_PORT already - expected if the old tunnel is still up; it'll be replaced below. If this is the web-interface port and it's a leftover dev server (Tomcat/webpack/etc. commonly squat 8080), pick a different WEB_LOCAL_PORT instead of assuming it's safe to kill."
