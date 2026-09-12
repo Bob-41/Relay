@@ -30,6 +30,37 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHDOG_SRC="${SCRIPT_DIR}/adb-forwarder-connect.sh"
 SCRIPT_PATH="/usr/local/bin/adb-forwarder-connect.sh"
 
+# Print a useful label next to each Wi-Fi interface so users do not have to
+# guess which adapter is internal versus an external USB adapter.
+describe_wifi_adapter() {
+    local iface="$1" props device_path bus vendor model label
+    if command -v udevadm >/dev/null 2>&1; then
+        props="$(udevadm info --query=property --path="/sys/class/net/${iface}" 2>/dev/null || true)"
+    else
+        props=""
+    fi
+    bus="$(awk -F= '$1 == "ID_BUS" { print $2; exit }' <<<"$props")"
+    vendor="$(awk -F= '$1 == "ID_VENDOR_FROM_DATABASE" { print $2; exit }' <<<"$props")"
+    model="$(awk -F= '$1 == "ID_MODEL_FROM_DATABASE" { print $2; exit }' <<<"$props")"
+
+    # Some built-in radios do not expose ID_BUS through udev. Their sysfs
+    # device path still identifies the physical bus reliably.
+    device_path="$(readlink -f "/sys/class/net/${iface}/device" 2>/dev/null || true)"
+    if [ -z "$bus" ]; then
+        case "$device_path" in
+            */usb*) bus="usb" ;;
+            */mmc*|*/platform/*|*/pci*) bus="internal" ;;
+        esac
+    fi
+
+    case "$bus" in
+        usb) label="USB Wi-Fi adapter" ;;
+        pci|platform|mmc|sdio|internal) label="internal Wi-Fi adapter" ;;
+        *) label="Wi-Fi adapter" ;;
+    esac
+    printf '  %s: %s%s%s\n' "$iface" "${vendor:+${vendor} }" "${model:+${model} }" "$label"
+}
+
 if [ "$AUTO" = "1" ]; then
     if [ ! -f "$CONFIG_FILE" ]; then
         echo "--auto requires an existing $CONFIG_FILE - run without --auto first."
@@ -109,7 +140,10 @@ else
 
     echo ""
     echo "=== Robot Wifi join + shared adb server ==="
-    nmcli -t -f DEVICE,TYPE device | awk -F: '$2=="wifi"{print "  "$1}'
+    echo "Choose the adapter that can see the robot's Wi-Fi:"
+    while IFS=: read -r iface type; do
+        [ "$type" = "wifi" ] && describe_wifi_adapter "$iface"
+    done < <(nmcli -t -f DEVICE,TYPE device)
     read -rp "WiFi interface to join the robot wifi: " WIFI_IFACE
     [ -z "$WIFI_IFACE" ] && { echo "Aborting."; exit 1; }
     read -rp "Robot wifi SSID: " TARGET_SSID
