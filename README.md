@@ -1,25 +1,61 @@
 # Relay
 
-Shared ADB bridge for FTC (FIRST Tech Challenge) workshops. Relay lets any
-laptop running Android Studio deploy to a REV Control Hub over WiFi through
-one shared bridge machine — no USB, no direct WiFi connection to the robot
-per laptop, and multiple laptops can deploy at the same time. If you will 
-use Tailscale, then you can upload to your robot from anywhere in the world 
-as long as you have internet access and the bridge is near the robot. 
-Instructions for Tailscale are down below.
+Relay lets a group of FTC teams use Android Studio with one REV Control Hub at
+the same time. Each laptop sees the Control Hub as an Android device and can
+deploy normally—without plugging in USB or joining the robot's Wi-Fi directly.
 
-## How it works
+## How Relay works
 
-One Linux machine (the **bridge**) joins the robot's WiFi AP and runs a
-shared `adb` server. Each laptop opens an SSH tunnel into that server, so
-Android Studio's normal deploy flow just works, unmodified.
+One small Linux computer, usually a Raspberry Pi, sits next to the robot. It
+joins the Control Hub's Wi-Fi and keeps one shared ADB connection open. Each
+laptop makes a secure SSH connection to that computer.
 
-## Install
+```text
+Android Studio on each laptop
+            │ secure SSH tunnel
+            ▼
+      Relay bridge (Raspberry Pi)
+            │ Control Hub Wi-Fi
+            ▼
+       REV Control Hub
+```
 
-### 1. Bridge machine (once)
+This means several laptops can build and deploy to the same robot. Coordinate
+before deploying at the exact same moment, just as you would when sharing any
+robot.
 
-Any Linux box with `systemd` + `NetworkManager` (a Raspberry Pi, a spare
-laptop, etc.):
+## What is Tailscale?
+
+[Tailscale](https://tailscale.com/) is a private network for your own devices.
+After you sign in to the same Tailscale account on the bridge and on each
+laptop, they can reach each other securely from different Wi-Fi networks. It
+does not make the bridge public on the internet.
+
+Use Tailscale if you want the simplest setup or need to reach a bridge from
+somewhere else. Relay can also use a fixed local-network IP when every laptop
+and the bridge are on the same network.
+
+## Before you start
+
+You need:
+
+- A Linux bridge with `systemd`, NetworkManager, and `adb` installed. A
+  Raspberry Pi is a common choice.
+- The Control Hub's Wi-Fi name and password.
+- One network connection for the bridge besides the robot Wi-Fi (for example,
+  home Wi-Fi or Ethernet). With Tailscale, it needs internet access.
+- Android Studio on each laptop.
+- For the recommended setup, Tailscale installed and signed in on the bridge
+  and every laptop that will use Relay.
+
+The stock Control Hub address is already built into Relay:
+`192.168.43.1:5555`. You do not need to look it up.
+
+## Install Relay
+
+### Step 1: Set up the bridge once
+
+On the Linux bridge, run:
 
 ```bash
 git clone https://github.com/Bob-41/Relay.git
@@ -27,20 +63,22 @@ cd Relay/bridge
 sudo bash install.sh
 ```
 
-It'll ask a few questions:
-- how laptops should reach this machine (**Tailscale** recommended, or a
-  static LAN IP)
-- the robot's WiFi name/password and device IP (defaults are correct for a
-  stock REV Control Hub)
+The installer asks for:
 
-At the end it prints the host/user/port to give to laptops — write those
-down.
+1. The non-root Linux user that should run Relay.
+2. How laptops will find the bridge: choose **Tailscale** for the recommended
+   setup, or provide a fixed local-network address.
+3. The Wi-Fi adapter that should join the Control Hub.
+4. The Control Hub Wi-Fi name and password.
 
-### 2. Each laptop (once per laptop)
+If you choose Tailscale and it is not installed, the installer can install it
+and opens the sign-in step. When setup finishes, save the bridge host/IP and
+the Linux username it reports. You will enter both on every laptop.
 
-IMPORTANT: WINDOWS IS IN ALPHA SO DON'T EXPECT IT TO WORK CURRENTLY
+### Step 2: Set up each laptop once
 
-Mac or Linux — Terminal. Windows — **Git Bash** (not PowerShell/cmd):
+On macOS or Linux, open Terminal. On Windows, open **Git Bash** (not
+PowerShell or Command Prompt), then run:
 
 ```bash
 git clone https://github.com/Bob-41/Relay.git
@@ -48,45 +86,63 @@ cd Relay/laptop
 bash install.sh
 ```
 
-Enter the host/user/port from step 1. Pick **SSH key** auth when asked
-(needed for auto-update, and you only enter the bridge's password once).
+Enter the bridge host/IP and Linux username from Step 1. Choose **SSH key**
+authentication when prompted. You enter the bridge password once so Relay can
+add the key; after that, the tunnel reconnects automatically and can receive
+safe nightly updates.
 
-Restart Android Studio — the Control Hub should show up in the device
-dropdown like it's plugged in by USB.
+Restart Android Studio when the installer finishes. The Control Hub should
+appear in the device selector. If it does not, first confirm that the laptop
+and bridge are both connected to Tailscale (or to the same LAN if using the
+local-IP option).
 
-## Auto-update
+### Optional: open the robot web tools from a laptop
 
-Both installers register a nightly check (~03:00) that pulls fixes from
-this repo automatically:
+After the laptop tunnel is running, open:
 
-- Only applies if `VERSION` in this repo has increased — a push doesn't
-  roll out until that file is deliberately bumped.
-- Every downloaded script is syntax-checked before it's ever run. A bad
-  download or commit fails closed: the current install keeps running,
-  the failure is logged, and it retries the next night.
-- Only the watchdog/tunnel is restarted — never the shared adb server —
-  so an update doesn't interrupt an unrelated live connection.
-- **Laptop auto-update only applies to SSH-key tunnels.** Password-auth
-  tunnels aren't auto-updated; re-run `laptop/install.sh` manually on
-  those.
+| Tool | Address |
+| --- | --- |
+| Control Hub Program & Manage / FTC Dashboard | `http://localhost:8091` |
+| Panels | `http://localhost:8001` |
 
+## Updates
 
+Relay checks for updates overnight, around 3 AM. An update is applied only
+when the repository's `VERSION` is deliberately increased. Downloaded shell
+scripts are syntax-checked before Relay uses them; if a check fails, the
+current working installation remains in place.
 
-## Tailscale
+Automatic laptop updates require SSH-key authentication. If you chose password
+authentication, re-run `laptop/install.sh` to update that laptop.
+
+## Troubleshooting
+
+- **The bridge cannot find the Control Hub Wi-Fi:** confirm that its chosen
+  Wi-Fi adapter supports the Control Hub's band. A 5 GHz Control Hub requires
+  a 5 GHz-capable adapter.
+- **Android Studio does not show the Control Hub:** restart Android Studio,
+  then verify the bridge is reachable and the laptop installer completed.
+- **A tunnel will not start because port 5037 is in use:** close Android Studio
+  and re-run the laptop installer. Relay recognizes and clears a local ADB
+  server on that port; it does not automatically kill unknown programs.
+- **Panels loads only a blank page:** make sure you are using the current
+  laptop installer, which forwards both the Panels web page and its live-data
+  connection.
 
 ## Logs
 
 | Component | Location |
-|---|---|
+| --- | --- |
 | Bridge watchdog | `/var/log/adb-forwarder.log`, `journalctl -u adb-forwarder-connect.service` |
-| Bridge adb server | `journalctl -u adb-forwarder-server.service` |
-| Mac tunnel | `/tmp/adbtunnel-<host>.log` |
-| Windows tunnel | `%APPDATA%\adb-tunnel\adb-tunnel-<host>.log` |
+| Bridge ADB server | `journalctl -u adb-forwarder-server.service` |
+| macOS tunnel | `/tmp/adbtunnel-<host>.log` |
+| Windows tunnel | `%APPDATA%\\adb-tunnel\\adb-tunnel-<host>.log` |
 
-## Known limitations
+## Current limitations
 
-- Windows persistence/auto-update is unverified on real hardware.
-- No concurrent-deploy locking — two laptops deploying at once is visible
-  and non-destructive; verbal coordination is the accepted mitigation.
-- Auto-update never touches WiFi credentials or site-specific network
-  config — only the generic watchdog/tunnel logic.
+- Windows persistence and automatic updates still need more real-hardware
+  verification.
+- Relay does not lock deployments. Multiple laptops can be connected, but teams
+  should communicate before deploying at the same time.
+- Updates never change saved Wi-Fi credentials or site-specific network
+  settings.
