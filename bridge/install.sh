@@ -40,6 +40,10 @@ if [ "$AUTO" = "1" ]; then
     echo "=== ADB Bridge auto-update (replaying saved config) ==="
 else
     echo "=== ADB Bridge Setup ==="
+    echo ""
+    echo "Before you begin: text in [brackets] is the default answer."
+    echo "Press Enter to use it; if you are unsure, use the default."
+    echo "If you make a mistake, press Ctrl+C and run: sudo bash install.sh"
     DEFAULT_USER="${SUDO_USER:-}"
     read -rp "Non-root user to run the bridge services as [${DEFAULT_USER}]: " SERVICE_USER
     SERVICE_USER="${SERVICE_USER:-$DEFAULT_USER}"
@@ -50,7 +54,7 @@ else
 
     echo ""
     echo "=== Reachability: how will laptops reach this bridge machine? ==="
-    echo "  1) Tailscale (recommended) side note: even if you aren't planning to use it or using both at the same time, choose it so then you won't have to configure later."
+    echo "  1) Tailscale (recommended)"
     echo "  2) Static LAN IP"
     read -rp "Choice [1]: " REACH_CHOICE
     REACH_CHOICE="${REACH_CHOICE:-1}"
@@ -110,7 +114,7 @@ else
     [ -z "$WIFI_IFACE" ] && { echo "Aborting."; exit 1; }
     read -rp "Robot wifi SSID: " TARGET_SSID
     [ -z "$TARGET_SSID" ] && { echo "Aborting."; exit 1; }
-    read -rsp "Robot wifi password (blank if open): " WIFI_PASS; echo ""
+    read -rp "Robot wifi password (shown as you type; blank if open): " WIFI_PASS
     # Control Hub AP mode always assigns itself 192.168.43.1:5555 - a
     # hardware constant of AP mode, not a per-installation choice, same
     # reasoning as ROBOT_IP on the laptop side. Not prompted.
@@ -126,13 +130,10 @@ else
         nmcli connection add type wifi con-name "$TARGET_SSID" ifname "$WIFI_IFACE" ssid "$TARGET_SSID"
     fi
     if [ -n "$WIFI_PASS" ]; then
-        # Via stdin to `nmcli connection edit`, not argv - keeps it off `ps aux`.
-        nmcli connection edit "$TARGET_SSID" <<NMCLI_EOF
-set wifi-sec.key-mgmt wpa-psk
-set wifi-sec.psk $WIFI_PASS
-save
-quit
-NMCLI_EOF
+        # Direct configuration avoids nmcli's confusing interactive editor.
+        nmcli connection modify "$TARGET_SSID" wifi-sec.key-mgmt wpa-psk wifi-sec.psk "$WIFI_PASS"
+    else
+        nmcli connection modify "$TARGET_SSID" wifi-sec.key-mgmt none
     fi
     nmcli connection modify "$TARGET_SSID" connection.interface-name "$WIFI_IFACE" connection.autoconnect yes
 
@@ -149,6 +150,9 @@ ADB_PORT="${ADB_PORT}"
 LOG_FILE="${LOG_FILE}"
 REACH_IP="${REACH_IP}"
 EOF
+    # The watchdog runs as SERVICE_USER, so it must own this mode-600 config.
+    # WIFI_PASS is not stored here; NetworkManager keeps that secret separately.
+    chown "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_FILE"
     chmod 600 "$CONFIG_FILE"
 fi
 
