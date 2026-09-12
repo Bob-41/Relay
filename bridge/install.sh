@@ -50,7 +50,7 @@ else
 
     echo ""
     echo "=== Reachability: how will laptops reach this bridge machine? ==="
-    echo "  1) Tailscale (recommended)"
+    echo "  1) Tailscale (recommended) side note: even if you aren't planning to use it or using both at the same time, choose it so then you won't have to configure later."
     echo "  2) Static LAN IP"
     read -rp "Choice [1]: " REACH_CHOICE
     REACH_CHOICE="${REACH_CHOICE:-1}"
@@ -81,7 +81,7 @@ else
         nmcli -t -f DEVICE,TYPE device | awk -F: '$2!="loopback"{print "  "$1" ("$2")"}'
         read -rp "Uplink interface: " UPLINK_IFACE
         [ -z "$UPLINK_IFACE" ] && { echo "Aborting."; exit 1; }
-        read -rp "Router already has a fixed DHCP reservation for this machine? [y/N]: " HAS_RESERVATION
+        read -rp "Router already has a fixed DHCP reservation for this machine? (search that up if you don't know what it means) [y/N]: " HAS_RESERVATION
         if [ "$HAS_RESERVATION" = "y" ] || [ "$HAS_RESERVATION" = "Y" ]; then
             read -rp "That reserved IP: " REACH_IP
             [ -z "$REACH_IP" ] && { echo "Aborting."; exit 1; }
@@ -104,18 +104,18 @@ else
     fi
 
     echo ""
-    echo "=== Robot AP join + shared adb server ==="
+    echo "=== Robot Wifi join + shared adb server ==="
     nmcli -t -f DEVICE,TYPE device | awk -F: '$2=="wifi"{print "  "$1}'
-    read -rp "WiFi interface to join the target AP: " WIFI_IFACE
+    read -rp "WiFi interface to join the robot wifi: " WIFI_IFACE
     [ -z "$WIFI_IFACE" ] && { echo "Aborting."; exit 1; }
-    read -rp "Target AP SSID: " TARGET_SSID
+    read -rp "Robot wifi SSID: " TARGET_SSID
     [ -z "$TARGET_SSID" ] && { echo "Aborting."; exit 1; }
-    read -rsp "AP password (blank if open): " WIFI_PASS; echo ""
+    read -rsp "Robot wifi password (blank if open): " WIFI_PASS; echo ""
     read -rp "Device IP [192.168.43.1]: " DEVICE_IP; DEVICE_IP="${DEVICE_IP:-192.168.43.1}"
     read -rp "Device adb port [5555]: " DEVICE_PORT; DEVICE_PORT="${DEVICE_PORT:-5555}"
     read -rp "Local adb server port [5037]: " ADB_PORT; ADB_PORT="${ADB_PORT:-5037}"
     LOG_FILE="/var/log/adb-forwarder.log"
-
+ 
     echo "Configuring NetworkManager profile for $TARGET_SSID..."
     if nmcli -t -f NAME connection show | grep -Fxq "$TARGET_SSID"; then
         echo "Existing profile found, updating."
