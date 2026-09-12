@@ -404,11 +404,55 @@ linux)
     ;;
 esac
 
-if [ "$AUTO" != "1" ]; then
+# --- Verify the tunnel actually came up before declaring success ---
+# launchctl load / Register-ScheduledTask can report success even when the
+# underlying ssh process immediately dies (e.g. ExitOnForwardFailure killing
+# ALL forwards over a single port conflict) - a loader exit code only tells
+# you the service was registered, not that it's running. Check the real
+# local port state directly instead of trusting that.
+HEALTH_OK=1
+if [ "$PLATFORM" = "mac" ]; then
+    sleep 2
+    for CHECK_PORT in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT"; do
+        if ! lsof -iTCP:"$CHECK_PORT" -sTCP:LISTEN -P >/dev/null 2>&1; then
+            echo "WARNING: port $CHECK_PORT is not listening - tunnel did not come up cleanly."
+            HEALTH_OK=0
+        fi
+    done
+elif [ "$PLATFORM" = "windows" ]; then
+    sleep 3
+    for CHECK_PORT in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT"; do
+        if command -v netstat >/dev/null 2>&1 && ! netstat -ano 2>/dev/null | grep -q ":${CHECK_PORT} .*LISTENING"; then
+            echo "WARNING: port $CHECK_PORT is not listening - tunnel did not come up cleanly."
+            HEALTH_OK=0
+        fi
+    done
+fi
+# (linux path never starts a live process itself - nothing to health-check.)
+
+if [ "$AUTO" = "1" ]; then
+    if [ "$HEALTH_OK" = "0" ]; then
+        echo "Auto-update replay did NOT bring the tunnel up cleanly - see log for ${REMOTE_HOST}."
+        exit 1
+    fi
+else
     echo ""
-    echo "=== Done ==="
-    echo "adb server should be reachable at localhost:${LOCAL_PORT}."
-    echo "Control Hub web interface (Program & Manage) should be reachable at http://localhost:${WEB_LOCAL_PORT}"
-    echo "Panels dashboard (if used) should be reachable at http://localhost:${PANELS_LOCAL_PORT}"
-    echo "Quit and reopen Android Studio, confirm the device shows up before deploying."
+    if [ "$HEALTH_OK" = "1" ]; then
+        echo "=== Done ==="
+        echo "adb server should be reachable at localhost:${LOCAL_PORT}."
+        echo "Control Hub web interface (Program & Manage) should be reachable at http://localhost:${WEB_LOCAL_PORT}"
+        echo "Panels dashboard (if used) should be reachable at http://localhost:${PANELS_LOCAL_PORT}"
+        echo "Quit and reopen Android Studio, confirm the device shows up before deploying."
+    else
+        echo "=== Setup ran, but the tunnel is NOT confirmed healthy ==="
+        echo "One or more forwarded ports never came up. Likely cause: something else is"
+        echo "already bound to one of ${LOCAL_PORT}/${WEB_LOCAL_PORT}/${PANELS_LOCAL_PORT} -"
+        echo "ExitOnForwardFailure kills the WHOLE tunnel if even one forward fails, so the"
+        echo "adb forward can be down even though only the web-interface port collided."
+        case "$PLATFORM" in
+            mac) echo "Check: /tmp/adbtunnel-${SAFE_HOST}.log and /tmp/adbtunnel-${SAFE_HOST}.err" ;;
+            windows) echo "Check: ${LOG_FILE_WIN}" ;;
+        esac
+        exit 1
+    fi
 fi
