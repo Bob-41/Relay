@@ -11,24 +11,44 @@
 
 set -euo pipefail
 
+# Keep the installer easy to scan in a terminal, while leaving redirected logs
+# as plain text without ANSI escape sequences.
+if [ -t 1 ] && command -v tput >/dev/null 2>&1 && tput colors >/dev/null 2>&1; then
+    BOLD="$(tput bold)"
+    CYAN="$(tput setaf 6)"
+    YELLOW="$(tput setaf 3)"
+    RED="$(tput setaf 1)"
+    RESET="$(tput sgr0)"
+else
+    BOLD=""
+    CYAN=""
+    YELLOW=""
+    RED=""
+    RESET=""
+fi
+
+section() { printf '\n%s%s%s\n' "${BOLD}${CYAN}" "$1" "$RESET"; }
+important() { printf '%s%s%s\n' "${BOLD}${YELLOW}" "$1" "$RESET"; }
+warning() { printf '%sWARNING: %s%s\n' "${BOLD}${RED}" "$1" "$RESET"; }
+
 AUTO=0
 [ "${1:-}" = "--auto" ] && AUTO=1
 
 if [ "$EUID" -ne 0 ]; then
-    echo "Run this with sudo."
+    warning "Run this with sudo."
     exit 1
 fi
 if ! command -v iw >/dev/null 2>&1; then
     if command -v apt-get >/dev/null 2>&1; then
-        echo "Installing iw so Relay can show Wi-Fi adapter band support..."
+        important "Installing iw so Relay can show Wi-Fi adapter band support..."
         apt-get install -y iw
     else
-        echo "iw is required to show Wi-Fi adapter band support. Install it, then re-run this script."
+        warning "iw is required to show Wi-Fi adapter band support. Install it, then re-run this script."
         exit 1
     fi
 fi
 for bin in systemctl nmcli adb ss iw; do
-    command -v "$bin" >/dev/null 2>&1 || { echo "$bin not found. Aborting."; exit 1; }
+    command -v "$bin" >/dev/null 2>&1 || { warning "$bin not found. Aborting."; exit 1; }
 done
 
 CONFIG_DIR="/etc/adb-forwarder"
@@ -98,13 +118,11 @@ if [ "$AUTO" = "1" ]; then
     fi
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
-    echo "=== ADB Bridge auto-update (replaying saved config) ==="
+    section "=== ADB Bridge auto-update (replaying saved config) ==="
 else
-    echo "=== ADB Bridge Setup ==="
-    echo ""
-    echo "Before you begin: text in [brackets] is the default answer."
-    echo "Press Enter to use it; if you are unsure, use the default."
-    echo "If you make a mistake, press Ctrl+C and run: sudo bash install.sh"
+    section "=== ADB Bridge Setup ==="
+    important "Text in [brackets] is the default answer. Press Enter to use it."
+    important "If you are unsure, use the default. To start over, press Ctrl+C and run: sudo bash install.sh"
     DEFAULT_USER="${SUDO_USER:-}"
     read -rp "Non-root user to run the bridge services as [${DEFAULT_USER}]: " SERVICE_USER
     SERVICE_USER="${SERVICE_USER:-$DEFAULT_USER}"
@@ -113,9 +131,8 @@ else
         exit 1
     fi
 
-    echo ""
-    echo "=== Reachability: how will laptops reach this bridge machine? ==="
-    echo "  1) Tailscale (recommended)"
+    section "=== How laptops reach this bridge ==="
+    important "  1) Tailscale (recommended)"
     echo "  2) Static LAN IP"
     read -rp "Choice [1]: " REACH_CHOICE
     REACH_CHOICE="${REACH_CHOICE:-1}"
@@ -168,9 +185,8 @@ else
         fi
     fi
 
-    echo ""
-    echo "=== Robot Wifi join + shared adb server ==="
-    echo "Control Hubs use 5 GHz by default. Choose a 5 GHz-capable adapter when possible."
+    section "=== Robot Wi-Fi and shared ADB server ==="
+    important "Control Hubs use 5 GHz by default. Choose a 5 GHz-capable adapter when possible."
     echo "Choose the adapter that can see the robot's Wi-Fi:"
     WIFI_INTERFACES=()
     FIVE_GHZ_INTERFACES=()
@@ -342,13 +358,12 @@ if [ "$AUTO" != "1" ]; then
     if ss -ltn 2>/dev/null | grep -q ":${ADB_PORT} "; then
         echo "Port ${ADB_PORT} is bound and listening."
     else
-        echo "WARNING: port ${ADB_PORT} not listening yet. Check: systemctl status adb-forwarder-server.service"
+        warning "Port ${ADB_PORT} not listening yet. Check: systemctl status adb-forwarder-server.service"
     fi
     LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-    echo ""
-    echo "=== Done ==="
-    echo "On laptops, point setup at:"
-    echo "  host: ${REACH_IP:-<not set>}   user: ${SERVICE_USER}   port: ${ADB_PORT}"
+    section "=== Setup complete ==="
+    important "On laptops, point setup at:"
+    important "  host: ${REACH_IP:-<not set>}   user: ${SERVICE_USER}   port: ${ADB_PORT}"
     echo "(plain LAN IP for reference: ${LAN_IP:-unknown})"
     echo ""
     echo "Logs: ${LOG_FILE}  |  journalctl -u adb-forwarder-connect.service"
