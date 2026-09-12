@@ -405,7 +405,11 @@ PSEOF
         mkdir -p "$STARTUP_DIR"
         cp "$WRAPPER_BAT" "$STARTUP_BAT"
         echo "Startup entry installed: ${STARTUP_BAT}"
-        echo "The tunnel will start at your next logon. To start it immediately without logging off, run that file now."
+        # The Startup folder only runs at the next logon. Start the same copied
+        # wrapper now so the port-liveness check below verifies the fallback,
+        # rather than guaranteedly failing on this first installation.
+        powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '$STARTUP_BAT'"
+        echo "Started the Startup-folder tunnel now; it will also restart at your next logon."
         echo "NOTE: unlike the Scheduled Task path, if the tunnel's console window gets closed it will NOT auto-restart until next logon."
     fi
 
