@@ -1,7 +1,7 @@
 # Relay
 
-Relay lets a group of FTC teams use Android Studio with one REV Control Hub at
-the same time. Each laptop sees the Control Hub as an Android device and can
+Relay lets more than one person on a FTC team use Android Studio with one REV Control Hub at
+the same time while connected to your home WiFi.  Each laptop sees the Control Hub as an Android device and can
 deploy normally—without plugging in USB or joining the robot's Wi-Fi directly.
 
 ## How Relay works
