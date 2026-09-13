@@ -185,8 +185,12 @@ SAFE_HOST="${REMOTE_HOST//[^a-zA-Z0-9]/_}"
 # `adb` invocation) and is always safe to ask to shut down via `adb kill-server`.
 if [ "$PLATFORM" = "windows" ]; then
     if command -v netstat >/dev/null 2>&1 && netstat -ano 2>/dev/null | grep -q ":${LOCAL_PORT} .*LISTENING"; then
-        LOCAL_PID="$(netstat -ano 2>/dev/null | awk -v p=":${LOCAL_PORT}" '$0 ~ p && $0 ~ /LISTENING/ {print $NF; exit}')"
-        LOCAL_IMAGE="$(tasklist //FI "PID eq ${LOCAL_PID}" //FO CSV //NH 2>/dev/null | awk -F'","' '{gsub(/"/,"",$1); print $1}')"
+        # netstat/tasklist emit CRLF - a trailing \r survives into the last awk
+        # field (PID, then image name) and silently breaks string comparisons
+        # below even though the printed value looks correct. Strip it before
+        # it's used anywhere, not just where it happens to bite.
+        LOCAL_PID="$(netstat -ano 2>/dev/null | tr -d '\r' | awk -v p=":${LOCAL_PORT}" '$0 ~ p && $0 ~ /LISTENING/ {print $NF; exit}')"
+        LOCAL_IMAGE="$(tasklist //FI "PID eq ${LOCAL_PID}" //FO CSV //NH 2>/dev/null | tr -d '\r' | awk -F'","' '{gsub(/"/,"",$1); print $1}')"
         if [ "$LOCAL_IMAGE" = "adb.exe" ] && command -v adb >/dev/null 2>&1; then
             echo "Local adb server already on port ${LOCAL_PORT} (PID ${LOCAL_PID}) - shutting it down before starting the tunnel."
             adb -P "${LOCAL_PORT}" kill-server >/dev/null 2>&1 || true
