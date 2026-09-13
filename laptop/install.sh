@@ -374,16 +374,26 @@ goto loop
 EOF
     fi
     WIN_WRAPPER_BAT="$(cygpath -w "$WRAPPER_BAT")"
+    # Task Scheduler runs a .bat through a visible cmd.exe window.  Use
+    # wscript.exe as the task action instead so the persistent tunnel is
+    # genuinely backgrounded; closing a stray console must never be required
+    # to keep the Control Hub visible in Android Studio.
+    WRAPPER_VBS="${INSTALL_DIR}/adb-tunnel-${SAFE_HOST}.vbs"
+    cat > "$WRAPPER_VBS" <<EOF
+Set shell = CreateObject("WScript.Shell")
+shell.Run "cmd.exe /c ""${WIN_WRAPPER_BAT}""", 0, True
+EOF
+    WIN_WRAPPER_VBS="$(cygpath -w "$WRAPPER_VBS")"
 
     PS1="${INSTALL_DIR}/install-task-${SAFE_HOST}.ps1"
     cat > "$PS1" <<'PSEOF'
-param([string]$TaskName, [string]$Wrapper, [string]$RemoteHost)
+param([string]$TaskName, [string]$Launcher, [string]$RemoteHost)
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 Get-CimInstance Win32_Process -Filter "Name='ssh.exe' or Name='sshpass.exe'" |
     Where-Object { $_.CommandLine -and $_.CommandLine.Contains($RemoteHost) } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 try {
-    $Action   = New-ScheduledTaskAction -Execute $Wrapper
+    $Action   = New-ScheduledTaskAction -Execute "$env:WINDIR\System32\wscript.exe" -Argument "`"$Launcher`""
     $Trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -DontStopOnIdleEnd -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Force -ErrorAction Stop | Out-Null
@@ -396,17 +406,19 @@ try {
 PSEOF
     PS1_WIN="$(cygpath -w "$PS1")"
     STARTUP_DIR="$(cygpath -u "$APPDATA")/Microsoft/Windows/Start Menu/Programs/Startup"
+    STARTUP_VBS="${STARTUP_DIR}/adb-tunnel-${SAFE_HOST}.vbs"
     STARTUP_BAT="${STARTUP_DIR}/adb-tunnel-${SAFE_HOST}.bat"
-    if powershell -NoProfile -ExecutionPolicy Bypass -File "$PS1_WIN" -TaskName "$TASK_NAME" -Wrapper "$WIN_WRAPPER_BAT" -RemoteHost "$REMOTE_HOST"; then
+    if powershell -NoProfile -ExecutionPolicy Bypass -File "$PS1_WIN" -TaskName "$TASK_NAME" -Launcher "$WIN_WRAPPER_VBS" -RemoteHost "$REMOTE_HOST"; then
         echo "Tunnel task '${TASK_NAME}' registered via Scheduled Task. Log: ${LOG_FILE_WIN}"
-        rm -f "$STARTUP_BAT"  # in case an earlier run on this machine fell back to Startup folder
+        rm -f "$STARTUP_BAT" "$STARTUP_VBS"  # in case an earlier run fell back to Startup
     else
         echo "Scheduled Task creation was denied on this machine (needs elevation here) - falling back to Startup-folder persistence."
         mkdir -p "$STARTUP_DIR"
-        cp "$WRAPPER_BAT" "$STARTUP_BAT"
-        echo "Startup entry installed: ${STARTUP_BAT}"
+        cp "$WRAPPER_VBS" "$STARTUP_VBS"
+        rm -f "$STARTUP_BAT"
+        echo "Startup entry installed: ${STARTUP_VBS}"
         echo "The tunnel will start at your next logon. To start it immediately without logging off, run that file now."
-        echo "NOTE: unlike the Scheduled Task path, if the tunnel's console window gets closed it will NOT auto-restart until next logon."
+        echo "The tunnel runs without a visible Command Prompt window."
     fi
 
     # Register the updater scheduled task (key-auth only), once.
