@@ -13,6 +13,29 @@
 
 set -euo pipefail
 
+# Keep the installer easy to scan in a terminal, while leaving redirected logs
+# as plain text without ANSI escape sequences. Same helpers as bridge/install.sh -
+# keep both in sync if this changes. tput can be flaky in some MSYS/Git Bash
+# setups on Windows, which is exactly why this is gated behind -t 1 and
+# command -v tput rather than assumed to work.
+if [ -t 1 ] && command -v tput >/dev/null 2>&1 && tput colors >/dev/null 2>&1; then
+    BOLD="$(tput bold)"
+    CYAN="$(tput setaf 6)"
+    YELLOW="$(tput setaf 3)"
+    RED="$(tput setaf 1)"
+    RESET="$(tput sgr0)"
+else
+    BOLD=""
+    CYAN=""
+    YELLOW=""
+    RED=""
+    RESET=""
+fi
+
+section() { printf '\n%s%s%s\n' "${BOLD}${CYAN}" "$1" "$RESET"; }
+important() { printf '%s%s%s\n' "${BOLD}${YELLOW}" "$1" "$RESET"; }
+warning() { printf '%sWARNING: %s%s\n' "${BOLD}${RED}" "$1" "$RESET"; }
+
 AUTO=0
 AUTO_CONFIG=""
 if [ "${1:-}" = "--auto" ]; then
@@ -31,8 +54,7 @@ case "$(uname -s)" in
 esac
 
 if [ "$PLATFORM" = "wsl" ]; then
-    echo "WSL detected - separate network namespace from Windows. Run this from"
-    echo "Git Bash on native Windows instead if Android Studio runs there."
+    warning "WSL detected - separate network namespace from Windows. Run this from Git Bash on native Windows instead if Android Studio runs there."
     exit 1
 fi
 
@@ -42,7 +64,7 @@ if [ "$PLATFORM" = "windows" ]; then
         command -v "$bin" >/dev/null 2>&1 || MISSING="$MISSING $bin"
     done
     if [ -n "$MISSING" ]; then
-        echo "Missing:$MISSING - install Git for Windows (with OpenSSH option) and re-run from Git Bash."
+        warning "Missing:$MISSING - install Git for Windows (with OpenSSH option) and re-run from Git Bash."
         exit 1
     fi
     SSH_BIN_WIN="$(cygpath -w "$(command -v ssh)")"
@@ -69,19 +91,17 @@ if [ "$AUTO" = "1" ]; then
     # this forward existed, same pattern as WEB_LOCAL_PORT above.
     PANELS_WS_LOCAL_PORT="${PANELS_WS_LOCAL_PORT:-8002}"
     PANELS_WS_REMOTE_PORT="${PANELS_WS_REMOTE_PORT:-8002}"
-    echo "=== ADB Tunnel auto-update (${REMOTE_HOST}), replaying saved config ==="
+    section "=== ADB Tunnel auto-update (${REMOTE_HOST}), replaying saved config ==="
     if [ "$AUTH_CHOICE" != "1" ]; then
-        echo "Password-auth config found under --auto - this should never happen"
-        echo "(password configs aren't supposed to get an updater registered)."
+        warning "Password-auth config found under --auto - this should never happen (password configs aren't supposed to get an updater registered)."
         exit 1
     fi
     if ! ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 "${REMOTE_USER}@${REMOTE_HOST}" 'echo ok' >/dev/null 2>&1; then
-        echo "Key auth check failed for ${REMOTE_HOST} - not touching the existing tunnel."
-        echo "(Key may be revoked, host may be down. Fix manually, don't blind-retry.)"
+        warning "Key auth check failed for ${REMOTE_HOST} - not touching the existing tunnel. (Key may be revoked, host may be down. Fix manually, don't blind-retry.)"
         exit 1
     fi
 else
-    echo "=== ADB Bridge Tunnel Setup ==="
+    section "=== ADB Bridge Tunnel Setup ==="
     read -rp "Remote host (IP, Tailscale address, or hostname): " REMOTE_HOST
     [ -z "$REMOTE_HOST" ] && { echo "Aborting."; exit 1; }
     read -rp "Remote username: " REMOTE_USER
@@ -107,9 +127,9 @@ else
     PANELS_WS_REMOTE_PORT="8002"
 
     echo ""
-    echo "Auth method:"
-    echo "  1) SSH key (recommended - required for auto-update)"
-    echo "  2) Password (auto-update will NOT be set up for this tunnel)"
+    important "Auth method:"
+    important "  1) SSH key (recommended - required for auto-update)"
+    important "  2) Password (auto-update will NOT be set up for this tunnel)"
     read -rp "Choice [1]: " AUTH_CHOICE
     AUTH_CHOICE="${AUTH_CHOICE:-1}"
 
@@ -134,12 +154,12 @@ else
                 "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '${PUBKEY}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
         fi
         if ! ssh -i "$KEY" -o BatchMode=yes "${REMOTE_USER}@${REMOTE_HOST}" 'echo ok' >/dev/null 2>&1; then
-            echo "Key auth failed. Aborting."; exit 1
+            warning "Key auth failed. Aborting."; exit 1
         fi
         echo "Key auth confirmed."
     else
         if ! command -v sshpass >/dev/null 2>&1; then
-            echo "sshpass not found (macOS: brew install hudochenkov/sshpass/sshpass). Aborting."
+            warning "sshpass not found (macOS: brew install hudochenkov/sshpass/sshpass). Aborting."
             exit 1
         fi
         read -rsp "Remote password (stored plaintext at ~/.adb-tunnel-pass_${SAFE_HOST}, chmod 600): " REMOTE_PASS
@@ -149,7 +169,7 @@ else
         chmod 600 "$PASSFILE"
         unset REMOTE_PASS
         if ! sshpass -f "$PASSFILE" ssh -o StrictHostKeyChecking=accept-new "${REMOTE_USER}@${REMOTE_HOST}" 'echo ok' >/dev/null 2>&1; then
-            echo "Password auth failed. Aborting."; rm -f "$PASSFILE"; exit 1
+            warning "Password auth failed. Aborting."; rm -f "$PASSFILE"; exit 1
         fi
         echo "Password auth confirmed. Auto-update will be skipped for this tunnel."
     fi
@@ -192,13 +212,13 @@ if [ "$PLATFORM" = "windows" ]; then
         LOCAL_PID="$(netstat -ano 2>/dev/null | tr -d '\r' | awk -v p=":${LOCAL_PORT}" '$0 ~ p && $0 ~ /LISTENING/ {print $NF; exit}')"
         LOCAL_IMAGE="$(tasklist //FI "PID eq ${LOCAL_PID}" //FO CSV //NH 2>/dev/null | tr -d '\r' | awk -F'","' '{gsub(/"/,"",$1); print $1}')"
         if [ "$LOCAL_IMAGE" = "adb.exe" ] && command -v adb >/dev/null 2>&1; then
-            echo "Local adb server already on port ${LOCAL_PORT} (PID ${LOCAL_PID}) - shutting it down before starting the tunnel."
+            important "Local adb server already on port ${LOCAL_PORT} (PID ${LOCAL_PID}) - shutting it down before starting the tunnel."
             adb -P "${LOCAL_PORT}" kill-server >/dev/null 2>&1 || true
             sleep 1
             netstat -ano 2>/dev/null | grep -q ":${LOCAL_PORT} .*LISTENING" && \
-                echo "WARNING: port ${LOCAL_PORT} still held after kill-server - tunnel setup may fail."
+                warning "port ${LOCAL_PORT} still held after kill-server - tunnel setup may fail."
         else
-            echo "NOTE: something non-adb is on local port ${LOCAL_PORT} (PID ${LOCAL_PID}, image ${LOCAL_IMAGE:-unknown}) - not touching it automatically."
+            important "NOTE: something non-adb is on local port ${LOCAL_PORT} (PID ${LOCAL_PID}, image ${LOCAL_IMAGE:-unknown}) - not touching it automatically."
         fi
     fi
 elif command -v lsof >/dev/null 2>&1; then
@@ -206,13 +226,13 @@ elif command -v lsof >/dev/null 2>&1; then
     if [ -n "$LOCAL_PID" ]; then
         LOCAL_CMD="$(ps -p "$LOCAL_PID" -o comm= 2>/dev/null | xargs -n1 basename 2>/dev/null)"
         if [ "$LOCAL_CMD" = "adb" ] && command -v adb >/dev/null 2>&1; then
-            echo "Local adb server already on port ${LOCAL_PORT} (PID ${LOCAL_PID}) - shutting it down before starting the tunnel."
+            important "Local adb server already on port ${LOCAL_PORT} (PID ${LOCAL_PID}) - shutting it down before starting the tunnel."
             adb -P "${LOCAL_PORT}" kill-server >/dev/null 2>&1 || true
             sleep 1
             lsof -iTCP:"${LOCAL_PORT}" -sTCP:LISTEN -P >/dev/null 2>&1 && \
-                echo "WARNING: port ${LOCAL_PORT} still held after kill-server - tunnel setup may fail."
+                warning "port ${LOCAL_PORT} still held after kill-server - tunnel setup may fail."
         else
-            echo "NOTE: something non-adb is on local port ${LOCAL_PORT} (PID ${LOCAL_PID}, command ${LOCAL_CMD:-unknown}) - not touching it automatically."
+            important "NOTE: something non-adb is on local port ${LOCAL_PORT} (PID ${LOCAL_PID}, command ${LOCAL_CMD:-unknown}) - not touching it automatically."
         fi
     fi
 fi
@@ -221,10 +241,10 @@ fi
 for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
     if [ "$PLATFORM" = "windows" ]; then
         if command -v netstat >/dev/null 2>&1 && netstat -ano 2>/dev/null | grep -q ":${CHECK_PORT} .*LISTENING"; then
-            echo "NOTE: something is on local port $CHECK_PORT already - expected if the old tunnel is still up; it'll be replaced below. If this is the web-interface port and it's a leftover dev server (Tomcat/webpack/etc. commonly squat 8080), pick a different WEB_LOCAL_PORT instead of assuming it's safe to kill."
+            important "NOTE: something is on local port $CHECK_PORT already - expected if the old tunnel is still up; it'll be replaced below. If this is the web-interface port and it's a leftover dev server (Tomcat/webpack/etc. commonly squat 8080), pick a different WEB_LOCAL_PORT instead of assuming it's safe to kill."
         fi
     elif command -v lsof >/dev/null 2>&1 && lsof -iTCP:"$CHECK_PORT" -sTCP:LISTEN -P >/dev/null 2>&1; then
-        echo "NOTE: something is on local port $CHECK_PORT already - expected if the old tunnel is still up; it'll be replaced below. If this is the web-interface port and it's a leftover dev server (Tomcat/webpack/etc. commonly squat 8080), pick a different WEB_LOCAL_PORT instead of assuming it's safe to kill."
+        important "NOTE: something is on local port $CHECK_PORT already - expected if the old tunnel is still up; it'll be replaced below. If this is the web-interface port and it's a leftover dev server (Tomcat/webpack/etc. commonly squat 8080), pick a different WEB_LOCAL_PORT instead of assuming it's safe to kill."
     fi
 done
 
@@ -342,7 +362,7 @@ EOF
             echo "Auto-update registered (daily 3am check): /tmp/adbtunnel-updater.log"
         fi
     fi
-    echo "LaunchAgent installed and loaded. Log: /tmp/adbtunnel-${SAFE_HOST}.log"
+    important "LaunchAgent installed and loaded. Log: /tmp/adbtunnel-${SAFE_HOST}.log"
     ;;
 
 windows)
@@ -413,10 +433,10 @@ PSEOF
     STARTUP_VBS="${STARTUP_DIR}/adb-tunnel-${SAFE_HOST}.vbs"
     STARTUP_BAT="${STARTUP_DIR}/adb-tunnel-${SAFE_HOST}.bat"
     if powershell -NoProfile -ExecutionPolicy Bypass -File "$PS1_WIN" -TaskName "$TASK_NAME" -Launcher "$WIN_WRAPPER_VBS" -RemoteHost "$REMOTE_HOST"; then
-        echo "Tunnel task '${TASK_NAME}' registered via Scheduled Task. Log: ${LOG_FILE_WIN}"
+        important "Tunnel task '${TASK_NAME}' registered via Scheduled Task. Log: ${LOG_FILE_WIN}"
         rm -f "$STARTUP_BAT" "$STARTUP_VBS"  # in case an earlier run fell back to Startup
     else
-        echo "Scheduled Task creation was denied on this machine (needs elevation here) - falling back to Startup-folder persistence."
+        important "Scheduled Task creation was denied on this machine (needs elevation here) - falling back to Startup-folder persistence."
         mkdir -p "$STARTUP_DIR"
         cp "$WRAPPER_VBS" "$STARTUP_VBS"
         rm -f "$STARTUP_BAT"
@@ -431,7 +451,7 @@ PSEOF
         WIN_STARTUP_VBS="$(cygpath -w "$STARTUP_VBS")"
         wscript.exe "$WIN_STARTUP_VBS" >/dev/null 2>&1 &
         disown 2>/dev/null || true
-        echo "Started the Startup-folder tunnel now (no visible console window); it will also restart at your next logon."
+        important "Started the Startup-folder tunnel now (no visible console window); it will also restart at your next logon."
     fi
 
     # Register the updater scheduled task (key-auth only), once.
@@ -490,7 +510,7 @@ if [ "$PLATFORM" = "mac" ]; then
     sleep 2
     for CHECK_PORT in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
         if ! lsof -iTCP:"$CHECK_PORT" -sTCP:LISTEN -P >/dev/null 2>&1; then
-            echo "WARNING: port $CHECK_PORT is not listening - tunnel did not come up cleanly."
+            warning "port $CHECK_PORT is not listening - tunnel did not come up cleanly."
             HEALTH_OK=0
         fi
     done
@@ -498,7 +518,7 @@ elif [ "$PLATFORM" = "windows" ]; then
     sleep 3
     for CHECK_PORT in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
         if command -v netstat >/dev/null 2>&1 && ! netstat -ano 2>/dev/null | grep -q ":${CHECK_PORT} .*LISTENING"; then
-            echo "WARNING: port $CHECK_PORT is not listening - tunnel did not come up cleanly."
+            warning "port $CHECK_PORT is not listening - tunnel did not come up cleanly."
             HEALTH_OK=0
         fi
     done
@@ -507,19 +527,19 @@ fi
 
 if [ "$AUTO" = "1" ]; then
     if [ "$HEALTH_OK" = "0" ]; then
-        echo "Auto-update replay did NOT bring the tunnel up cleanly - see log for ${REMOTE_HOST}."
+        warning "Auto-update replay did NOT bring the tunnel up cleanly - see log for ${REMOTE_HOST}."
         exit 1
     fi
 else
     echo ""
     if [ "$HEALTH_OK" = "1" ]; then
-        echo "=== Done ==="
+        section "=== Done ==="
         echo "adb server should be reachable at localhost:${LOCAL_PORT}."
         echo "Control Hub web interface (Program & Manage) should be reachable at http://localhost:${WEB_LOCAL_PORT}"
         echo "Panels dashboard (if used) should be reachable at http://localhost:${PANELS_LOCAL_PORT}"
         echo "Quit and reopen Android Studio, confirm the device shows up before deploying."
     else
-        echo "=== Setup ran, but the tunnel is NOT confirmed healthy ==="
+        warning "Setup ran, but the tunnel is NOT confirmed healthy"
         echo "One or more forwarded ports never came up. Likely cause: something else is"
         echo "already bound to one of ${LOCAL_PORT}/${WEB_LOCAL_PORT}/${PANELS_LOCAL_PORT}/${PANELS_WS_LOCAL_PORT} -"
         echo "ExitOnForwardFailure kills the WHOLE tunnel if even one forward fails, so the"
