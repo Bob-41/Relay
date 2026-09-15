@@ -146,3 +146,9 @@ authentication, re-run `laptop/install.sh` to update that laptop.
   should communicate before deploying at the same time.
 - Updates never change saved Wi-Fi credentials or site-specific network
   settings.
+- Plain `bridge/install.sh` does not fix an ADB protocol version mismatch
+  between a newer Control Hub and an older distro-packaged `adb` (e.g. Debian
+  bookworm's 35.0.2). If you hit that mismatch, the working fix so far has
+  been running Google's official `adb` under `box64` emulation instead of the
+  distro package — that step is manual and not yet part of the installer.
+  Re-running the installer after a fresh reinstall will not restore it.
