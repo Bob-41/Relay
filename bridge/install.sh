@@ -225,7 +225,8 @@ ensure_box64_amd64_libs() {
     # fights Raspberry Pi OS's patched arm64 libc). Matches the 2026-09-14
     # decision: apt-get download + dpkg -x into /opt/box64-libs.
     local tmp codename list_file have_libc=0 have_libgcc=0
-    if [ -e "${BOX64_LIBS_DIR}/lib/x86_64-linux-gnu/libc.so.6" ]; then
+    if [ -e "${BOX64_LIBS_DIR}/lib/x86_64-linux-gnu/libc.so.6" ] \
+        || [ -e "${BOX64_LIBS_DIR}/usr/lib/x86_64-linux-gnu/libc.so.6" ]; then
         have_libc=1
     fi
     if [ -e "${BOX64_LIBS_DIR}/lib/x86_64-linux-gnu/libgcc_s.so.1" ] \
@@ -237,6 +238,14 @@ ensure_box64_amd64_libs() {
     fi
     important "Extracting amd64 glibc/libgcc into ${BOX64_LIBS_DIR} for box64..."
     tmp="$(mktemp -d)"
+    # Modern apt (Debian trixie+) drops privileges to the _apt user for
+    # `apt-get download`'s actual fetch, even when apt-get itself runs as
+    # root. mktemp -d makes a 0700 dir owned by root, which _apt can't write
+    # into, so the download silently lands nowhere and extraction ends up
+    # empty. Match /tmp's own permissions (mode 1777) so _apt can write here
+    # regardless of who apt decides to run as; the dir is root-owned scratch
+    # space removed immediately after, so this doesn't widen anything real.
+    chmod 1777 "$tmp"
     list_file="/etc/apt/sources.list.d/relay-amd64-download.list"
     codename="$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-bookworm}")"
 
@@ -257,6 +266,12 @@ ensure_box64_amd64_libs() {
             return 1
         fi
     fi
+    if ! compgen -G "$tmp"/*.deb > /dev/null; then
+        rm -rf "$tmp"
+        rm -f "$list_file"
+        warning "apt-get download reported success but no .deb files were found in ${tmp}."
+        return 1
+    fi
     mkdir -p "$BOX64_LIBS_DIR"
     local deb
     for deb in "$tmp"/*.deb; do
@@ -266,10 +281,14 @@ ensure_box64_amd64_libs() {
     rm -f "$list_file"
     # Refresh apt indices without the temporary amd64 mirror line.
     apt-get update >/dev/null 2>&1 || true
-    [ -e "${BOX64_LIBS_DIR}/lib/x86_64-linux-gnu/libc.so.6" ] || {
+    # dpkg -x into an empty tree with no merged-/usr symlink puts everything
+    # under usr/lib/x86_64-linux-gnu, not lib/x86_64-linux-gnu - check both,
+    # matching the libgcc check above and BOX64_LD_LIBRARY_PATH below.
+    if [ ! -e "${BOX64_LIBS_DIR}/lib/x86_64-linux-gnu/libc.so.6" ] \
+        && [ ! -e "${BOX64_LIBS_DIR}/usr/lib/x86_64-linux-gnu/libc.so.6" ]; then
         warning "amd64 libc extraction looked empty under ${BOX64_LIBS_DIR}."
         return 1
-    }
+    fi
 }
 
 install_google_platform_tools() {
