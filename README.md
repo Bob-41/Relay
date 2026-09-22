@@ -117,8 +117,13 @@ After the laptop tunnel is running, open:
 
 | Tool | Address |
 | --- | --- |
-| Control Hub Program & Manage / FTC Dashboard | `http://localhost:8091` |
+| Control Hub Program & Manage | `http://localhost:8091` |
+| FTC Dashboard | `http://localhost:8091` |
 | Panels | `http://localhost:8001` |
+
+Program & Manage and FTC Dashboard are the same web server on the hub
+(port 8080), so they share one forwarded address - if you're using FTC
+Dashboard, that's the URL to open.
 
 ## Updates
 
