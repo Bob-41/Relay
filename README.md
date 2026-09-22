@@ -41,8 +41,10 @@ and the bridge are on the same network.
 
 You need:
 
-- A Linux bridge with `systemd`, NetworkManager, and `adb` installed. A
-  Raspberry Pi is a common choice.
+- A Linux bridge with `systemd`, NetworkManager, and an SSH server. A
+  Raspberry Pi is a common choice. Debian-family (`apt`) and Arch-family
+  (`pacman`: Arch, CachyOS, EndeavourOS, Manjaro, Arch Linux ARM) distros are
+  supported. The installer installs `iw` and `adb` for you if they are missing.
 - The Control Hub's Wi-Fi name and password.
 - One network connection for the bridge besides the robot Wi-Fi (for example,
   home Wi-Fi or Ethernet). With Tailscale, it needs internet access.
@@ -74,8 +76,19 @@ The installer asks for:
 4. The Control Hub Wi-Fi name and password.
 
 If you choose Tailscale and it is not installed, the installer can install it
-and opens the sign-in step. When setup finishes, save the bridge host/IP and
+(from the distro package on Arch-family systems) and opens the sign-in step. When setup finishes, save the bridge host/IP and
 the Linux username it reports. You will enter both on every laptop.
+
+**Arch-family bridges:** the installer never runs `pacman -Sy` (a partial
+upgrade is unsupported on Arch). If a package install fails with a 404 or
+"failed retrieving file", run `sudo pacman -Syu` and re-run the installer.
+NetworkManager must already be installed and running
+(`sudo pacman -S networkmanager && sudo systemctl enable --now NetworkManager`)
+and an SSH server must be enabled
+(`sudo pacman -S openssh && sudo systemctl enable --now sshd`) - Arch does not
+enable either by default. If this machine uses `systemd-networkd`, `netctl` or
+`iwd` for networking, switching to NetworkManager changes how it manages
+Wi-Fi, so do that deliberately.
 
 ### Step 2: Set up each laptop once
 
@@ -148,7 +161,7 @@ authentication, re-run `laptop/install.sh` to update that laptop.
   should communicate before deploying at the same time.
 - Updates never change saved Wi-Fi credentials or site-specific network
   settings.
-- On aarch64 bridges (e.g. Raspberry Pi), if the distro `adb` is older than
+- On aarch64 Debian-family bridges (e.g. Raspberry Pi OS), if the distro `adb` is older than
   36.0.0, `bridge/install.sh` installs Google's x86_64 platform-tools under
   `box64` (`/opt/adb-google`, libs in `/opt/box64-libs`, wrapper at
   `/usr/local/bin/adb`) and points `adb-forwarder-server.service` at that

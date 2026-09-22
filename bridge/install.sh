@@ -6,6 +6,9 @@
 # Never re-prompts for or re-stores the WiFi password on --auto; the WiFi
 # connection profile itself is left untouched on --auto runs entirely.
 #
+# Supported bridge distros: Debian family (apt, e.g. Raspberry Pi OS) and Arch
+# family (pacman, e.g. Arch, CachyOS, EndeavourOS, Manjaro, Arch Linux ARM).
+#
 # Run WITH sudo. If the login shell here is fish, invoke explicitly:
 #   sudo bash install.sh
 
@@ -31,6 +34,95 @@ section() { printf '\n%s%s%s\n' "${BOLD}${CYAN}" "$1" "$RESET"; }
 important() { printf '%s%s%s\n' "${BOLD}${YELLOW}" "$1" "$RESET"; }
 warning() { printf '%sWARNING: %s%s\n' "${BOLD}${RED}" "$1" "$RESET"; }
 
+# --- Package manager abstraction ----------------------------------------------
+# apt is checked first so existing Debian / Raspberry Pi OS behaviour is
+# unchanged. On any other distro the prerequisites must be installed by hand.
+detect_pkg_manager() {
+    if command -v apt-get >/dev/null 2>&1; then
+        echo apt
+    elif command -v pacman >/dev/null 2>&1; then
+        echo pacman
+    else
+        echo none
+    fi
+}
+PKG_MGR="$(detect_pkg_manager)"
+
+# pkg_for <role> - the distro's package name for a generic role.
+pkg_for() {
+    case "${PKG_MGR}:$1" in
+        apt:adb)               echo adb ;;
+        pacman:adb)            echo android-tools ;;
+        apt:networkmanager)    echo network-manager ;;
+        pacman:networkmanager) echo networkmanager ;;
+        apt:openssh)           echo openssh-server ;;
+        pacman:openssh)        echo openssh ;;
+        *:iproute)             echo iproute2 ;;
+        *)                     echo "$1" ;;
+    esac
+}
+
+# pkg_install <package>... - non-interactive install; returns non-zero on failure.
+pkg_install() {
+    case "$PKG_MGR" in
+        apt)
+            apt-get install -y "$@"
+            ;;
+        pacman)
+            # Deliberately never `pacman -Sy`: on Arch, refreshing the sync
+            # database without a full upgrade (-Syu) is an unsupported partial
+            # upgrade that can break the system.
+            if ! pacman -S --needed --noconfirm "$@"; then
+                warning "pacman could not install: $*"
+                important "If it reports 404 / 'failed retrieving file', your package database is stale."
+                important "Run 'sudo pacman -Syu' (a full upgrade), then re-run this script."
+                return 1
+            fi
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# pkg_install_hint <role> - the command a human should run for that role.
+pkg_install_hint() {
+    case "$PKG_MGR" in
+        apt)    echo "sudo apt-get install -y $(pkg_for "$1")" ;;
+        pacman) echo "sudo pacman -S --needed $(pkg_for "$1")" ;;
+        *)      echo "install '$1' with your package manager" ;;
+    esac
+}
+
+# Laptops reach the bridge over SSH. The unit is ssh.service on Debian and
+# sshd.service on Arch; also accept socket-activated setups.
+ssh_server_active() {
+    local unit
+    for unit in sshd.service ssh.service sshd.socket ssh.socket; do
+        if systemctl is-active --quiet "$unit" 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+ssh_unit_name() {
+    if [ "$PKG_MGR" = "pacman" ]; then echo sshd; else echo ssh; fi
+}
+
+# `hostname -I` is a Debian-ism (Arch's inetutils hostname has no -I). With
+# `set -o pipefail` a failing hostname would abort the script before the final
+# "Setup complete" summary prints, so every step here tolerates failure.
+primary_lan_ip() {
+    local out=""
+    out="$(hostname -I 2>/dev/null | awk '{ print $1 }')" || true
+    if [ -z "$out" ]; then
+        out="$(ip -4 route get 1.1.1.1 2>/dev/null \
+            | awk '{ for (i = 1; i < NF; i++) if ($i == "src") { print $(i + 1); exit } }')" || true
+    fi
+    printf '%s' "$out"
+}
+
 # Google only ships Linux platform-tools as x86_64. On aarch64 (Raspberry Pi)
 # the distro `adb` package is capped (e.g. Debian 35.0.2) and cannot speak a
 # newer Control Hub / laptop-client protocol. Fix: run Google's binary under
@@ -54,6 +146,18 @@ version_lt() {
     [ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -n1)" = "$a" ] && [ "$a" != "$b" ]
 }
 
+# On pacman distros there is no automatic newer-adb fallback, so at least say so.
+warn_if_adb_old() {
+    local ver
+    [ "$PKG_MGR" = "pacman" ] || return 0
+    ver="$(adb_version_number "$1")"
+    if [ -n "$ver" ] && version_lt "$ver" "$MIN_ADB_VERSION"; then
+        warning "Distro adb ${ver} is older than ${MIN_ADB_VERSION}. If laptops report an adb server version mismatch, update it: sudo pacman -Syu"
+        important "(The automatic box64 + Google platform-tools fallback is apt-only.)"
+    fi
+    return 0
+}
+
 google_adb_wrapper_healthy() {
     command -v box64 >/dev/null 2>&1 \
         && [ -x "$GOOGLE_ADB_BIN" ] \
@@ -68,6 +172,10 @@ needs_box64_google_adb() {
         aarch64|arm64) ;;
         *) return 1 ;;
     esac
+    # The box64 fallback below is built on apt/dpkg (amd64 libc extraction,
+    # Debian box64 repos). On pacman distros Arch builds android-tools from
+    # source for each architecture, so the distro package is used as-is.
+    [ "$PKG_MGR" = "apt" ] || return 1
     google_adb_wrapper_healthy && return 1
 
     local apt_ver
@@ -215,6 +323,7 @@ ensure_adb_for_bridge() {
             important "Using existing Google adb under box64: ${ADB_BIN} ($(adb_version_number "$ADB_BIN"))"
         else
             important "Using system adb: ${ADB_BIN} ($(adb_version_number "$ADB_BIN"))"
+            warn_if_adb_old "$ADB_BIN"
         fi
         return 0
     fi
@@ -245,16 +354,31 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 if ! command -v iw >/dev/null 2>&1; then
-    if command -v apt-get >/dev/null 2>&1; then
+    if [ "$PKG_MGR" != "none" ]; then
         important "Installing iw so Relay can show Wi-Fi adapter band support..."
-        apt-get install -y iw
+        pkg_install "$(pkg_for iw)" || { warning "Could not install iw. Aborting."; exit 1; }
     else
         warning "iw is required to show Wi-Fi adapter band support. Install it, then re-run this script."
         exit 1
     fi
 fi
+if ! command -v adb >/dev/null 2>&1 && [ "$PKG_MGR" != "none" ]; then
+    important "Installing adb ($(pkg_for adb))..."
+    pkg_install "$(pkg_for adb)" || { warning "Could not install adb. Aborting."; exit 1; }
+fi
 for bin in systemctl nmcli adb ss iw; do
-    command -v "$bin" >/dev/null 2>&1 || { warning "$bin not found. Aborting."; exit 1; }
+    if ! command -v "$bin" >/dev/null 2>&1; then
+        warning "$bin not found. Aborting."
+        case "$bin" in
+            nmcli)
+                important "Install NetworkManager and start it:"
+                important "  $(pkg_install_hint networkmanager) && sudo systemctl enable --now NetworkManager"
+                ;;
+            ss)  important "  $(pkg_install_hint iproute)" ;;
+            adb) important "  $(pkg_install_hint adb)" ;;
+        esac
+        exit 1
+    fi
 done
 
 CONFIG_DIR="/etc/adb-forwarder"
@@ -329,6 +453,12 @@ else
     section "=== ADB Bridge Setup ==="
     important "Text in [brackets] is the default answer. Press Enter to use it."
     important "If you are unsure, use the default. To start over, press Ctrl+C and run: sudo bash install.sh"
+    if ! systemctl is-active --quiet NetworkManager.service; then
+        warning "NetworkManager is installed but not running. Relay manages Wi-Fi through it."
+        important "Start it with: sudo systemctl enable --now NetworkManager"
+        important "(If this machine uses systemd-networkd, netctl or iwd to manage networking, switch deliberately - NetworkManager takes over Wi-Fi.)"
+        exit 1
+    fi
     DEFAULT_USER="${SUDO_USER:-}"
     read -rp "Non-root user to run the bridge services as [${DEFAULT_USER}]: " SERVICE_USER
     SERVICE_USER="${SERVICE_USER:-$DEFAULT_USER}"
@@ -345,6 +475,14 @@ else
     REACH_IP=""
 
     if [ "$REACH_CHOICE" = "1" ]; then
+        if ! command -v tailscale >/dev/null 2>&1 && [ "$PKG_MGR" = "pacman" ]; then
+            read -rp "Tailscale not installed. Install the 'tailscale' package with pacman now? [y/N]: " DO_INSTALL
+            if [ "$DO_INSTALL" = "y" ] || [ "$DO_INSTALL" = "Y" ]; then
+                pkg_install tailscale || { echo "Aborting."; exit 1; }
+            else
+                echo "Aborting."; exit 1
+            fi
+        fi
         if ! command -v tailscale >/dev/null 2>&1; then
             read -rp "Tailscale not installed. Install via official script now? [y/N]: " DO_INSTALL
             if [ "$DO_INSTALL" = "y" ] || [ "$DO_INSTALL" = "Y" ]; then
@@ -460,6 +598,7 @@ fi
 source "$CONFIG_FILE"
 
 POLKIT_RULE="/etc/polkit-1/rules.d/50-adb-forwarder-nm.rules"
+mkdir -p "$(dirname "$POLKIT_RULE")"
 cat > "$POLKIT_RULE" <<EOF
 polkit.addRule(function(action, subject) {
     if (action.id.indexOf("org.freedesktop.NetworkManager.") == 0 &&
@@ -602,7 +741,11 @@ if [ "$AUTO" != "1" ]; then
     else
         warning "Port ${ADB_PORT} not listening yet. Check: systemctl status adb-forwarder-server.service"
     fi
-    LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    LAN_IP="$(primary_lan_ip)"
+    if ! ssh_server_active; then
+        warning "No active SSH server found. Laptops connect to this bridge over SSH."
+        important "  $(pkg_install_hint openssh) && sudo systemctl enable --now $(ssh_unit_name)"
+    fi
     section "=== Setup complete ==="
     important "On laptops, point setup at:"
     important "  host: ${REACH_IP:-<not set>}   user: ${SERVICE_USER}   port: ${ADB_PORT}"
