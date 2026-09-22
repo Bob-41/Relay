@@ -31,6 +31,212 @@ section() { printf '\n%s%s%s\n' "${BOLD}${CYAN}" "$1" "$RESET"; }
 important() { printf '%s%s%s\n' "${BOLD}${YELLOW}" "$1" "$RESET"; }
 warning() { printf '%sWARNING: %s%s\n' "${BOLD}${RED}" "$1" "$RESET"; }
 
+# Google only ships Linux platform-tools as x86_64. On aarch64 (Raspberry Pi)
+# the distro `adb` package is capped (e.g. Debian 35.0.2) and cannot speak a
+# newer Control Hub / laptop-client protocol. Fix: run Google's binary under
+# box64, leaving apt's /usr/bin/adb untouched as a rollback path.
+GOOGLE_ADB_DIR="/opt/adb-google"
+GOOGLE_ADB_BIN="${GOOGLE_ADB_DIR}/platform-tools/adb"
+BOX64_LIBS_DIR="/opt/box64-libs"
+ADB_WRAPPER="/usr/local/bin/adb"
+PLATFORM_TOOLS_URL="https://dl.google.com/android/repository/platform-tools-latest-linux.zip"
+# Below this, treat distro adb on aarch64 as a protocol-mismatch risk.
+MIN_ADB_VERSION="36.0.0"
+
+adb_version_number() {
+    local bin="${1:-adb}"
+    "$bin" version 2>/dev/null | awk '/^Version / { sub(/-.*/, "", $2); print $2; exit }'
+}
+
+version_lt() {
+    local a="$1" b="$2"
+    [ -n "$a" ] && [ -n "$b" ] || return 0
+    [ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -n1)" = "$a" ] && [ "$a" != "$b" ]
+}
+
+google_adb_wrapper_healthy() {
+    command -v box64 >/dev/null 2>&1 \
+        && [ -x "$GOOGLE_ADB_BIN" ] \
+        && [ -x "$ADB_WRAPPER" ] \
+        && grep -q 'box64' "$ADB_WRAPPER" 2>/dev/null \
+        && "$ADB_WRAPPER" version >/dev/null 2>&1
+}
+
+# True when this host needs the box64 + Google platform-tools path.
+needs_box64_google_adb() {
+    case "$(uname -m)" in
+        aarch64|arm64) ;;
+        *) return 1 ;;
+    esac
+    google_adb_wrapper_healthy && return 1
+
+    local apt_ver
+    apt_ver="$(adb_version_number /usr/bin/adb)"
+    if [ -z "$apt_ver" ]; then
+        # aarch64 without a readable apt adb version still cannot run Google's
+        # x86_64 binary natively - install the wrapper path.
+        return 0
+    fi
+    version_lt "$apt_ver" "$MIN_ADB_VERSION"
+}
+
+ensure_box64_installed() {
+    if command -v box64 >/dev/null 2>&1; then
+        return 0
+    fi
+    important "Installing box64 (needed to run Google's x86_64 adb on this CPU)..."
+    if apt-get install -y box64 && command -v box64 >/dev/null 2>&1; then
+        return 0
+    fi
+    if apt-get install -y box64-generic-arm && command -v box64 >/dev/null 2>&1; then
+        return 0
+    fi
+    # Raspberry Pi OS / Debian often need the Pi-Apps box64 builds.
+    important "Adding Pi-Apps-Coders box64 apt repo..."
+    command -v curl >/dev/null 2>&1 || apt-get install -y curl
+    command -v gpg >/dev/null 2>&1 || apt-get install -y gnupg
+    mkdir -p /usr/share/keyrings
+    curl -fsSL "https://pi-apps-coders.github.io/box64-debs/KEY.gpg" \
+        | gpg --dearmor -o /usr/share/keyrings/box64-archive-keyring.gpg
+    cat > /etc/apt/sources.list.d/box64.sources <<'EOF'
+Types: deb
+URIs: https://Pi-Apps-Coders.github.io/box64-debs/debian
+Suites: ./
+Signed-By: /usr/share/keyrings/box64-archive-keyring.gpg
+EOF
+    apt-get update
+    apt-get install -y box64-generic-arm
+    command -v box64 >/dev/null 2>&1 || {
+        warning "box64 install failed. Cannot install Google adb on aarch64."
+        return 1
+    }
+}
+
+ensure_box64_amd64_libs() {
+    # Extract only - never `apt-get install` amd64 libc onto the host (that
+    # fights Raspberry Pi OS's patched arm64 libc). Matches the 2026-09-14
+    # decision: apt-get download + dpkg -x into /opt/box64-libs.
+    local tmp codename list_file have_libc=0 have_libgcc=0
+    if [ -e "${BOX64_LIBS_DIR}/lib/x86_64-linux-gnu/libc.so.6" ]; then
+        have_libc=1
+    fi
+    if [ -e "${BOX64_LIBS_DIR}/lib/x86_64-linux-gnu/libgcc_s.so.1" ] \
+        || [ -e "${BOX64_LIBS_DIR}/usr/lib/x86_64-linux-gnu/libgcc_s.so.1" ]; then
+        have_libgcc=1
+    fi
+    if [ "$have_libc" = "1" ] && [ "$have_libgcc" = "1" ]; then
+        return 0
+    fi
+    important "Extracting amd64 glibc/libgcc into ${BOX64_LIBS_DIR} for box64..."
+    tmp="$(mktemp -d)"
+    list_file="/etc/apt/sources.list.d/relay-amd64-download.list"
+    codename="$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-bookworm}")"
+
+    if ! dpkg --print-foreign-architectures 2>/dev/null | grep -qx amd64; then
+        dpkg --add-architecture amd64
+    fi
+    # Ensure amd64 packages are fetchable even when the OS mirror is arm-only.
+    if ! grep -Rqs 'arch=amd64' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+        printf 'deb [arch=amd64] http://deb.debian.org/debian %s main\n' "$codename" > "$list_file"
+    fi
+    apt-get update
+    if ! (cd "$tmp" && apt-get download libc6:amd64 libgcc-s1:amd64); then
+        # Older suites used libgcc1 instead of libgcc-s1.
+        if ! (cd "$tmp" && apt-get download libc6:amd64 libgcc1:amd64); then
+            rm -rf "$tmp"
+            rm -f "$list_file"
+            warning "Failed to download amd64 libc/libgcc debs."
+            return 1
+        fi
+    fi
+    mkdir -p "$BOX64_LIBS_DIR"
+    local deb
+    for deb in "$tmp"/*.deb; do
+        dpkg -x "$deb" "$BOX64_LIBS_DIR"
+    done
+    rm -rf "$tmp"
+    rm -f "$list_file"
+    # Refresh apt indices without the temporary amd64 mirror line.
+    apt-get update >/dev/null 2>&1 || true
+    [ -e "${BOX64_LIBS_DIR}/lib/x86_64-linux-gnu/libc.so.6" ] || {
+        warning "amd64 libc extraction looked empty under ${BOX64_LIBS_DIR}."
+        return 1
+    }
+}
+
+install_google_platform_tools() {
+    local tmp zip
+    important "Fetching Google platform-tools (x86_64) into ${GOOGLE_ADB_DIR}..."
+    command -v unzip >/dev/null 2>&1 || apt-get install -y unzip
+    tmp="$(mktemp -d)"
+    zip="${tmp}/platform-tools-latest-linux.zip"
+    if ! curl -fsSL --retry 3 -o "$zip" "$PLATFORM_TOOLS_URL"; then
+        rm -rf "$tmp"
+        warning "Failed to download ${PLATFORM_TOOLS_URL}"
+        return 1
+    fi
+    rm -rf "$GOOGLE_ADB_DIR"
+    mkdir -p "$GOOGLE_ADB_DIR"
+    if ! unzip -q "$zip" -d "$GOOGLE_ADB_DIR"; then
+        rm -rf "$tmp" "$GOOGLE_ADB_DIR"
+        warning "Failed to unzip platform-tools."
+        return 1
+    fi
+    rm -rf "$tmp"
+    chmod 755 "$GOOGLE_ADB_BIN"
+    [ -x "$GOOGLE_ADB_BIN" ] || {
+        warning "Expected ${GOOGLE_ADB_BIN} missing after extract."
+        return 1
+    }
+}
+
+write_adb_box64_wrapper() {
+    # /usr/local/bin beats /usr/bin on systemd's default PATH and on interactive
+    # logins, so bare `adb` picks this up. Apt's /usr/bin/adb is not modified.
+    cat > "$ADB_WRAPPER" <<EOF
+#!/bin/bash
+# Relay: Google platform-tools adb via box64. Rollback: /usr/bin/adb
+export BOX64_LD_LIBRARY_PATH="${BOX64_LIBS_DIR}/lib/x86_64-linux-gnu:${BOX64_LIBS_DIR}/usr/lib/x86_64-linux-gnu:${BOX64_LIBS_DIR}/lib64:\${BOX64_LD_LIBRARY_PATH:-}"
+exec box64 ${GOOGLE_ADB_BIN} "\$@"
+EOF
+    chmod 755 "$ADB_WRAPPER"
+}
+
+# Installs or repairs the box64 Google adb path when needed.
+# Sets ADB_BIN to the binary adb-forwarder-server.service should ExecStart.
+# Sets ADB_BIN_CHANGED=1 when the server binary/path was (re)provisioned.
+ensure_adb_for_bridge() {
+    ADB_BIN="$(command -v adb)"
+    ADB_BIN_CHANGED=0
+
+    if ! needs_box64_google_adb; then
+        if google_adb_wrapper_healthy; then
+            ADB_BIN="$ADB_WRAPPER"
+            important "Using existing Google adb under box64: ${ADB_BIN} ($(adb_version_number "$ADB_BIN"))"
+        else
+            important "Using system adb: ${ADB_BIN} ($(adb_version_number "$ADB_BIN"))"
+        fi
+        return 0
+    fi
+
+    section "=== ADB version mismatch on aarch64 ==="
+    important "Distro adb $(adb_version_number /usr/bin/adb) is below ${MIN_ADB_VERSION} (or unreadable)."
+    important "Installing Google platform-tools under box64. Leaving /usr/bin/adb alone."
+
+    ensure_box64_installed || return 1
+    ensure_box64_amd64_libs || return 1
+    install_google_platform_tools || return 1
+    write_adb_box64_wrapper || return 1
+
+    if ! google_adb_wrapper_healthy; then
+        warning "Google adb wrapper installed but failed \`adb version\`. Check box64 libs."
+        return 1
+    fi
+    ADB_BIN="$ADB_WRAPPER"
+    ADB_BIN_CHANGED=1
+    important "Google adb ready: ${ADB_BIN} ($(adb_version_number "$ADB_BIN"))"
+}
+
 AUTO=0
 [ "${1:-}" = "--auto" ] && AUTO=1
 
@@ -274,13 +480,32 @@ fi
 bash -n "$WATCHDOG_SRC" || { echo "FATAL: watchdog script fails syntax check, refusing to install."; exit 1; }
 install -m 755 "$WATCHDOG_SRC" "$SCRIPT_PATH"
 
+# Prefer Google+box64 on aarch64 when distro adb is too old for current hubs.
+# Failure here is non-fatal on interactive? No - without a working adb the
+# bridge is useless on mismatch. Abort so --auto retries next night.
+ensure_adb_for_bridge || {
+    warning "Could not provision a usable adb. Aborting."
+    exit 1
+}
+
+# Remember previous ExecStart so --auto can avoid bouncing a live shared server
+# unless the binary path actually changed (e.g. first-time box64 repair).
+PREV_SERVER_EXEC=""
+if [ -f /etc/systemd/system/adb-forwarder-server.service ]; then
+    PREV_SERVER_EXEC="$(awk -F= '/^ExecStart=/ { sub(/^ExecStart=/, ""); print; exit }' \
+        /etc/systemd/system/adb-forwarder-server.service)"
+fi
+
 cat > /etc/systemd/system/adb-forwarder-server.service <<EOF
 [Unit]
 Description=Shared adb server bound to all interfaces (LAN-visible)
 
 [Service]
 Type=simple
-ExecStart=$(command -v adb) -a -P ${ADB_PORT} nodaemon server
+# Absolute path: do not rely on PATH when the unit is started by systemd.
+# When using the box64 wrapper this is /usr/local/bin/adb; apt's
+# /usr/bin/adb remains installed as a manual rollback.
+ExecStart=${ADB_BIN} -a -P ${ADB_PORT} nodaemon server
 Restart=always
 RestartSec=3
 User=${SERVICE_USER}
@@ -297,6 +522,8 @@ After=network.target NetworkManager.service adb-forwarder-server.service
 
 [Service]
 Type=simple
+# Ensure bare \`adb\` in the watchdog resolves to the wrapper when present.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 ExecStart=${SCRIPT_PATH}
 Restart=always
 RestartSec=3
@@ -307,10 +534,21 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-systemctl enable --now adb-forwarder-server.service
+NEW_SERVER_EXEC="${ADB_BIN} -a -P ${ADB_PORT} nodaemon server"
+SERVER_NEEDS_RESTART=0
+if [ "$AUTO" != "1" ] || [ "$ADB_BIN_CHANGED" = "1" ] || [ "$PREV_SERVER_EXEC" != "$NEW_SERVER_EXEC" ]; then
+    SERVER_NEEDS_RESTART=1
+fi
+systemctl enable adb-forwarder-server.service >/dev/null 2>&1 || true
+if [ "$SERVER_NEEDS_RESTART" = "1" ]; then
+    systemctl restart adb-forwarder-server.service
+else
+    # --auto with unchanged server binary: leave live connections alone.
+    systemctl start adb-forwarder-server.service >/dev/null 2>&1 || true
+fi
 sleep 2
 # On --auto, only the watchdog logic may have changed - restart just that,
-# leave the adb server (and any live connections through it) alone.
+# leave the adb server alone unless we just reprovisioned it above.
 if [ "$AUTO" = "1" ]; then
     systemctl restart adb-forwarder-connect.service
     systemctl enable adb-forwarder-connect.service >/dev/null 2>&1 || true
@@ -355,6 +593,10 @@ if [ "$AUTO" != "1" ]; then
     sleep 5
     echo "adb-forwarder-server.service:  $(systemctl is-active adb-forwarder-server.service || true)"
     echo "adb-forwarder-connect.service: $(systemctl is-active adb-forwarder-connect.service || true)"
+    echo "adb binary: ${ADB_BIN} ($(adb_version_number "$ADB_BIN"))"
+    if [ "$ADB_BIN" = "$ADB_WRAPPER" ]; then
+        echo "apt adb left in place for rollback: /usr/bin/adb ($(adb_version_number /usr/bin/adb))"
+    fi
     if ss -ltn 2>/dev/null | grep -q ":${ADB_PORT} "; then
         echo "Port ${ADB_PORT} is bound and listening."
     else
