@@ -90,6 +90,21 @@ enable either by default. If this machine uses `systemd-networkd`, `netctl` or
 `iwd` for networking, switching to NetworkManager changes how it manages
 Wi-Fi, so do that deliberately.
 
+**Ubuntu bridges:** Ubuntu Desktop already uses NetworkManager. Ubuntu Server
+manages networking with netplan and `systemd-networkd` instead, so
+NetworkManager is usually not installed or running, and Relay needs it. Install
+it, plus an SSH server, before running the installer:
+
+```bash
+sudo apt update
+sudo apt install network-manager openssh-server
+sudo systemctl enable --now NetworkManager
+```
+
+Switching a machine over to NetworkManager changes how it manages Wi-Fi, and
+the network can drop while it changes over. Do this on a keyboard and monitor
+(or another console), not over an SSH session you depend on.
+
 ### Step 2: Set up each laptop once
 
 On macOS or Linux, open Terminal. On Windows, open **Git Bash** (not
