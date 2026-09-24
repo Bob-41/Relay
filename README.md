@@ -106,6 +106,14 @@ authentication when prompted. You enter the bridge password once so Relay can
 add the key; after that, the tunnel reconnects automatically and can receive
 safe nightly updates.
 
+**Windows: enter the bridge's IP address, not a hostname.** Use the Tailscale
+IP (for example `100.x.y.z`) when the installer asks for the bridge host. A
+short name such as `raspi` can fail to resolve on Windows, especially at logon
+while Tailscale is still starting, and the tunnel then retries forever with
+`Could not resolve hostname`. An IP address does not depend on DNS. Tailscale
+must also be running and signed in on the Windows laptop for the tunnel to
+connect.
+
 Restart Android Studio when the installer finishes. The Control Hub should
 appear in the device selector. If it does not, first confirm that the laptop
 and bridge are both connected to Tailscale (or to the same LAN if using the
