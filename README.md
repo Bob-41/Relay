@@ -92,12 +92,20 @@ Wi-Fi, so do that deliberately.
 
 **Ubuntu bridges:** Ubuntu Desktop already uses NetworkManager. Ubuntu Server
 manages networking with netplan and `systemd-networkd` instead, so
-NetworkManager is usually not installed or running, and Relay needs it. Install
-it, plus an SSH server, before running the installer:
+NetworkManager is usually not installed or running, and Relay needs it. Check
+first, then install only what's missing:
+
+```bash
+systemctl is-active NetworkManager   # active = already installed and running
+systemctl is-active ssh              # active = OpenSSH server already installed
+```
+
+If the Ubuntu Server install had the "Install OpenSSH server" option checked,
+`ssh` will already show `active` and you can skip that package below.
 
 ```bash
 sudo apt update
-sudo apt install network-manager openssh-server
+sudo apt install network-manager   # add openssh-server too if that check wasn't active
 sudo systemctl enable --now NetworkManager
 ```
 
