@@ -570,6 +570,13 @@ else
     read -rp "Robot wifi SSID: " TARGET_SSID
     [ -z "$TARGET_SSID" ] && { echo "Aborting."; exit 1; }
     read -rp "Robot wifi password (shown as you type; blank if open): " WIFI_PASS
+    # WPA-PSK passphrases must be 8-63 chars; nmcli rejects anything outside
+    # that range with a cryptic "property is invalid" error and no guidance.
+    # Catch it here with a message that actually says what's wrong.
+    if [ -n "$WIFI_PASS" ] && { [ "${#WIFI_PASS}" -lt 8 ] || [ "${#WIFI_PASS}" -gt 63 ]; }; then
+        echo "FATAL: WiFi password must be 8-63 characters for WPA-PSK (got ${#WIFI_PASS}). Aborting."
+        exit 1
+    fi
     # Control Hub AP mode always assigns itself 192.168.43.1:5555 - a
     # hardware constant of AP mode, not a per-installation choice, same
     # reasoning as ROBOT_IP on the laptop side. Not prompted.
