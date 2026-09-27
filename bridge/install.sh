@@ -567,6 +567,37 @@ else
     done
     read -rp "WiFi interface to join the robot wifi: " WIFI_IFACE
     [ -z "$WIFI_IFACE" ] && { echo "Aborting."; exit 1; }
+    # Dedicating this machine's only network interface to the robot AP means
+    # it loses every other network path the instant it joins - including
+    # whatever is carrying this very SSH session. A single-radio laptop
+    # cannot stay remotely reachable the way the reference Pi bridge does
+    # (two WiFi radios: one for the robot AP, one for admin/Tailscale).
+    # Refuse rather than let that surprise someone after the fact.
+    OTHER_IFACES=()
+    while IFS=: read -r iface type; do
+        [ "$iface" = "$WIFI_IFACE" ] && continue
+        case "$type" in
+            wifi|ethernet) OTHER_IFACES+=("$iface") ;;
+        esac
+    done < <(nmcli -t -f DEVICE,TYPE device)
+    if [ "${#OTHER_IFACES[@]}" -eq 0 ]; then
+        echo "FATAL: ${WIFI_IFACE} is the only network interface on this machine."
+        echo "Joining the robot's WiFi on it will disconnect this machine from"
+        echo "everything else, including whatever is carrying this SSH session,"
+        echo "with no fallback path to reach it again remotely."
+        echo "Plug in a second adapter (wired, or a second WiFi radio) and"
+        echo "re-run this installer - that's the right fix for a real bridge."
+        echo ""
+        echo "Only bypass this if you know you don't need remote access - e.g."
+        echo "a dev/bench setup with a monitor and keyboard on this machine the"
+        echo "whole time. Type DEV to continue anyway, anything else aborts:"
+        read -rp "> " SINGLE_IFACE_OVERRIDE
+        if [ "$SINGLE_IFACE_OVERRIDE" != "DEV" ]; then
+            echo "Aborting."
+            exit 1
+        fi
+        echo "Continuing on a single interface - remote access will NOT survive joining the robot's WiFi."
+    fi
     read -rp "Robot wifi SSID: " TARGET_SSID
     [ -z "$TARGET_SSID" ] && { echo "Aborting."; exit 1; }
     read -rp "Robot wifi password (shown as you type; blank if open): " WIFI_PASS
