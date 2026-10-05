@@ -222,9 +222,11 @@ if [ "$PLATFORM" = "windows" ]; then
         fi
     fi
 elif command -v lsof >/dev/null 2>&1; then
-    LOCAL_PID="$(lsof -tiTCP:"${LOCAL_PORT}" -sTCP:LISTEN -P 2>/dev/null | head -n1)"
+    # `|| true`: lsof exits 1 when nothing is listening, and under
+    # `set -eo pipefail` that would abort the whole installer right here.
+    LOCAL_PID="$(lsof -tiTCP:"${LOCAL_PORT}" -sTCP:LISTEN -P 2>/dev/null | head -n1 || true)"
     if [ -n "$LOCAL_PID" ]; then
-        LOCAL_CMD="$(ps -p "$LOCAL_PID" -o comm= 2>/dev/null | xargs -n1 basename 2>/dev/null)"
+        LOCAL_CMD="$(ps -p "$LOCAL_PID" -o comm= 2>/dev/null | xargs -n1 basename 2>/dev/null || true)"
         if [ "$LOCAL_CMD" = "adb" ] && command -v adb >/dev/null 2>&1; then
             important "Local adb server already on port ${LOCAL_PORT} (PID ${LOCAL_PID}) - shutting it down before starting the tunnel."
             adb -P "${LOCAL_PORT}" kill-server >/dev/null 2>&1 || true
