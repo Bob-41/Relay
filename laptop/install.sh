@@ -197,6 +197,96 @@ fi
 
 SAFE_HOST="${REMOTE_HOST//[^a-zA-Z0-9]/_}"
 
+# --- Reinstall support: tear down a previous install of THIS tunnel ---------
+# Re-running this installer on a laptop that already has a tunnel to this
+# bridge is a reinstall, and has to behave like one. Two things have to go, or
+# the new tunnel cannot come up cleanly:
+#
+#   1. The old persistence registration. Two LaunchAgents / Scheduled Tasks for
+#      the same host both respawning ssh is a fight, and the old one can win.
+#   2. The old tunnel's ssh itself. It keeps holding its forwarded ports after
+#      its registration is gone, and ExitOnForwardFailure=yes means ONE held
+#      forward kills the WHOLE new tunnel - including the adb forward. This is
+#      the same class of bug as the rogue-adb block below: the port is not
+#      "busy with our tunnel", it's "busy with a previous one of ours".
+#
+# Deliberately NOT run under --auto. That path replays a saved config onto a
+# live tunnel that laptops are using right now; tearing that down unattended
+# would turn a routine nightly update into an outage. The guard script handles
+# the respawn gap in normal operation - this only handles an explicit rerun.
+teardown_previous_install() {
+    local removed=0 pid name check_port killed=0
+    case "$PLATFORM" in
+        mac)
+            local prev_plist="$HOME/Library/LaunchAgents/com.adbtunnel.${SAFE_HOST}.plist"
+            if [ -f "$prev_plist" ]; then
+                important "Previous Relay tunnel found for ${REMOTE_HOST} - uninstalling it first."
+                # Unload BEFORE killing anything below. While the plist is
+                # still loaded, launchd respawns ssh the instant it dies, so a
+                # kill here would just race the agent recreating the tunnel.
+                launchctl unload "$prev_plist" 2>/dev/null || true
+                rm -f "$prev_plist"
+                removed=1
+            fi
+            # lsof is macOS-only here; the Windows equivalent lives in the
+            # PowerShell block further down, which already stops ssh.exe
+            # processes matching this host before it re-registers.
+            #
+            # Check ALL four forwarded ports, not just LOCAL_PORT: with
+            # ExitOnForwardFailure=yes a stale tunnel ssh holding only 8091
+            # still takes the whole new tunnel down, adb forward included.
+            # Only `ssh` is ever killed. A non-ssh listener on one of these
+            # ports is somebody's dev server and is reported, not touched -
+            # same policy as the rogue-adb block below.
+            for check_port in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
+                for pid in $(lsof -nP -tiTCP:"$check_port" -sTCP:LISTEN 2>/dev/null | sort -u); do
+                    name="$(basename "$(ps -p "$pid" -o comm= 2>/dev/null)")"
+                    if [ "$name" = "ssh" ]; then
+                        echo "  stopping stale tunnel ssh (pid $pid) still holding port $check_port"
+                        kill "$pid" 2>/dev/null && killed=1
+                    else
+                        important "  NOTE: port $check_port is held by ${name:-unknown} (pid $pid), not ssh - leaving it alone."
+                    fi
+                done
+            done
+            ;;
+        windows)
+            local prev_task="ADBTunnel-${SAFE_HOST}"
+            local startup_dir startup_vbs startup_bat
+            startup_dir="$(cygpath -u "$APPDATA")/Microsoft/Windows/Start Menu/Programs/Startup"
+            startup_vbs="${startup_dir}/adb-tunnel-${SAFE_HOST}.vbs"
+            startup_bat="${startup_dir}/adb-tunnel-${SAFE_HOST}.bat"
+            # Unregister up front rather than relying on the registration step
+            # below, so a run that ends up denied elevation does not silently
+            # leave the old task running alongside the new Startup-folder copy.
+            if powershell -NoProfile -ExecutionPolicy Bypass -Command \
+                "if (Get-ScheduledTask -TaskName '${prev_task}' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" 2>/dev/null; then
+                important "Previous Relay tunnel task '${prev_task}' found - uninstalling it first."
+                powershell -NoProfile -ExecutionPolicy Bypass -Command \
+                    "Unregister-ScheduledTask -TaskName '${prev_task}' -Confirm:\$false -ErrorAction SilentlyContinue" >/dev/null 2>&1 || true
+                removed=1
+            fi
+            if [ -f "$startup_vbs" ] || [ -f "$startup_bat" ]; then
+                [ "$removed" = "1" ] || important "Previous Relay Startup-folder entry found - uninstalling it first."
+                rm -f "$startup_vbs" "$startup_bat"
+                removed=1
+            fi
+            ;;
+        linux)
+            # Plain Linux installs no persistence at all - the installer only
+            # prints a command for the user to wire up themselves. Nothing
+            # registered here to tear down.
+            ;;
+    esac
+    [ "$removed" = "1" ] && echo "Previous install removed. Continuing with a fresh install."
+    [ "$killed" = "1" ] && sleep 1   # let the kernel release the listening socket
+    return 0
+}
+
+if [ "$AUTO" != "1" ]; then
+    teardown_previous_install
+fi
+
 # --- Clear a rogue local adb server off LOCAL_PORT before it can block the tunnel ---
 # LOCAL_PORT (default 5037) is ALWAYS supposed to be an adb server - unlike
 # WEB_LOCAL_PORT/PANELS_LOCAL_PORT below, which might legitimately be someone's
