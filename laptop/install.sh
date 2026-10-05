@@ -560,8 +560,20 @@ esac
 # local port state directly instead of trusting that.
 HEALTH_OK=1
 if [ "$PLATFORM" = "mac" ]; then
-    sleep 2
-    for CHECK_PORT in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
+    # The adb port only counts as up if the tunnel's ssh owns it on 127.0.0.1.
+    # "Something is listening" is not enough: it also passes for a rogue local
+    # adb server, or for a half-bound tunnel holding only [::1]. Poll instead
+    # of a fixed sleep - the guard may spend a second shutting a rogue adb
+    # server down before ssh even starts.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        lsof -nP -iTCP@127.0.0.1:"$LOCAL_PORT" -sTCP:LISTEN -Fc 2>/dev/null | grep -qx 'cssh' && break
+        sleep 1
+    done
+    if ! lsof -nP -iTCP@127.0.0.1:"$LOCAL_PORT" -sTCP:LISTEN -Fc 2>/dev/null | grep -qx 'cssh'; then
+        warning "127.0.0.1:${LOCAL_PORT} is not held by the tunnel's ssh - adb clients on this machine will not reach the bridge."
+        HEALTH_OK=0
+    fi
+    for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
         if ! lsof -iTCP:"$CHECK_PORT" -sTCP:LISTEN -P >/dev/null 2>&1; then
             warning "port $CHECK_PORT is not listening - tunnel did not come up cleanly."
             HEALTH_OK=0
