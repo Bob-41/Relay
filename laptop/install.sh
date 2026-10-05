@@ -253,6 +253,51 @@ case "$PLATFORM" in
 mac)
     PLIST="$HOME/Library/LaunchAgents/com.adbtunnel.${SAFE_HOST}.plist"
     LABEL="com.adbtunnel.${SAFE_HOST}"
+
+    # Guard that runs before EVERY (re)start of the tunnel's ssh (launchd
+    # respawns it after sleep/wake, network changes, etc.). Rewritten on every
+    # install/auto-update so it can't drift from this script.
+    GUARD="${CONFIG_ROOT}/adb-tunnel-guard.sh"
+    cat > "$GUARD" <<'GUARD_EOF'
+#!/bin/bash
+# adb-tunnel-guard.sh - written by laptop/install.sh, run by the LaunchAgent
+# before every (re)start of the tunnel's ssh:
+#     adb-tunnel-guard.sh LOCAL_PORT command [args...]
+#
+# Why: when the tunnel drops (sleep/wake, network change), nothing owns
+# 127.0.0.1:LOCAL_PORT until launchd respawns ssh. If Android Studio or a
+# stray `adb` call runs in that gap it auto-spawns a LOCAL adb server on that
+# port, and the respawned ssh can then no longer bind it - so adb clients end
+# up talking to a local server that has never seen the robot. Shut a local adb
+# server down before starting ssh. Anything on the port that is NOT adb is
+# left alone (ssh then fails loudly on its bind instead of being killed here).
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+PORT="${1:?usage: adb-tunnel-guard.sh LOCAL_PORT command [args...]}"
+shift
+[ "$#" -gt 0 ] || { echo "adb-tunnel-guard: no command given" >&2; exit 2; }
+
+log() { printf '%s adb-tunnel-guard: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >&2; }
+
+for PID in $(lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | sort -u); do
+    NAME="$(basename "$(ps -p "$PID" -o comm= 2>/dev/null)")"
+    if [ "$NAME" = "adb" ]; then
+        log "local adb server (pid $PID) is holding port $PORT - shutting it down."
+        # Same request `adb kill-server` sends. Speaking it directly means we
+        # don't depend on finding an adb binary on launchd's minimal PATH.
+        ( exec 3<>"/dev/tcp/localhost/$PORT" && printf '0009host:kill' >&3 ) 2>/dev/null || true
+        sleep 1
+        if lsof -nP -tiTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | grep -qx "$PID"; then
+            log "WARNING: pid $PID still holds port $PORT after the kill request."
+        fi
+    else
+        log "port $PORT is held by a non-adb process (pid $PID, ${NAME:-unknown}) - leaving it alone."
+    fi
+done
+
+exec "$@"
+GUARD_EOF
+    chmod 755 "$GUARD"
+
     if [ "$AUTH_CHOICE" = "1" ]; then
         PROGRAM_ARGS="
         <string>/usr/bin/ssh</string>
@@ -268,7 +313,7 @@ mac)
         <string>-o</string>
         <string>ServerAliveCountMax=3</string>
         <string>-L</string>
-        <string>${LOCAL_PORT}:localhost:${REMOTE_PORT}</string>
+        <string>127.0.0.1:${LOCAL_PORT}:localhost:${REMOTE_PORT}</string>
         <string>-L</string>
         <string>${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT}</string>
         <string>-L</string>
@@ -293,7 +338,7 @@ mac)
         <string>-o</string>
         <string>ServerAliveCountMax=3</string>
         <string>-L</string>
-        <string>${LOCAL_PORT}:localhost:${REMOTE_PORT}</string>
+        <string>127.0.0.1:${LOCAL_PORT}:localhost:${REMOTE_PORT}</string>
         <string>-L</string>
         <string>${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT}</string>
         <string>-L</string>
@@ -302,6 +347,12 @@ mac)
         <string>${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT}</string>
         <string>${REMOTE_USER}@${REMOTE_HOST}</string>"
     fi
+
+    # Run whichever ssh command was chosen above through the guard.
+    PROGRAM_ARGS="
+        <string>/bin/bash</string>
+        <string>${GUARD}</string>
+        <string>${LOCAL_PORT}</string>${PROGRAM_ARGS}"
     cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
