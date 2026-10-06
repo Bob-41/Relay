@@ -176,6 +176,13 @@ authentication, re-run `laptop/install.sh` to update that laptop.
 - **A tunnel will not start because port 5037 is in use:** close Android Studio
   and re-run the laptop installer. Relay recognizes and clears a local ADB
   server on that port; it does not automatically kill unknown programs.
+- **The Control Hub disappears overnight and re-running the installer brings it
+  back:** this was a known bug and the current laptop installer fixes it. A
+  sleeping laptop can wake with a local ADB server sitting on port 5037, which
+  made the tunnel bind only half the address it should have, so Android Studio
+  talked to a local server that had never seen the robot. Relay now clears that
+  server automatically every time the tunnel (re)starts. If it still happens,
+  check the tunnel log for `adb-tunnel-guard` messages.
 - **Panels loads only a blank page:** make sure you are using the current
   laptop installer, which forwards both the Panels web page and its live-data
   connection.

@@ -287,6 +287,25 @@ if [ "$AUTO" != "1" ]; then
     teardown_previous_install
 fi
 
+# windows_listener_image <port> - print the lowercased image name of whatever
+# is listening on <port> (adb.exe, ssh.exe, ...), or nothing if the port is
+# free. Used both to clear a rogue adb before installing and to prove the
+# tunnel's own ssh owns the port afterwards - the same question asked at two
+# points, so it lives in one place and cannot drift.
+#
+# netstat/tasklist emit CRLF - a trailing \r survives into the last awk field
+# (PID, then image name) and silently breaks string comparisons below even
+# though the printed value looks correct. Strip it before it's used anywhere,
+# not just where it happens to bite.
+windows_listener_image() {
+    local port="$1" listener_pid
+    listener_pid="$(netstat -ano 2>/dev/null | tr -d '\r' \
+        | awk -v p=":${port}" '$0 ~ p && $0 ~ /LISTENING/ { print $NF; exit }')"
+    [ -n "$listener_pid" ] || return 0
+    tasklist //FI "PID eq ${listener_pid}" //FO CSV //NH 2>/dev/null | tr -d '\r' \
+        | awk -F'","' 'NR == 1 { gsub(/"/, "", $1); print tolower($1); exit }'
+}
+
 # --- Clear a rogue local adb server off LOCAL_PORT before it can block the tunnel ---
 # LOCAL_PORT (default 5037) is ALWAYS supposed to be an adb server - unlike
 # WEB_LOCAL_PORT/PANELS_LOCAL_PORT below, which might legitimately be someone's
@@ -295,12 +314,8 @@ fi
 # `adb` invocation) and is always safe to ask to shut down via `adb kill-server`.
 if [ "$PLATFORM" = "windows" ]; then
     if command -v netstat >/dev/null 2>&1 && netstat -ano 2>/dev/null | grep -q ":${LOCAL_PORT} .*LISTENING"; then
-        # netstat/tasklist emit CRLF - a trailing \r survives into the last awk
-        # field (PID, then image name) and silently breaks string comparisons
-        # below even though the printed value looks correct. Strip it before
-        # it's used anywhere, not just where it happens to bite.
         LOCAL_PID="$(netstat -ano 2>/dev/null | tr -d '\r' | awk -v p=":${LOCAL_PORT}" '$0 ~ p && $0 ~ /LISTENING/ {print $NF; exit}')"
-        LOCAL_IMAGE="$(tasklist //FI "PID eq ${LOCAL_PID}" //FO CSV //NH 2>/dev/null | tr -d '\r' | awk -F'","' '{gsub(/"/,"",$1); print $1}')"
+        LOCAL_IMAGE="$(windows_listener_image "$LOCAL_PORT")"
         if [ "$LOCAL_IMAGE" = "adb.exe" ] && command -v adb >/dev/null 2>&1; then
             important "Local adb server already on port ${LOCAL_PORT} (PID ${LOCAL_PID}) - shutting it down before starting the tunnel."
             adb -P "${LOCAL_PORT}" kill-server >/dev/null 2>&1 || true
@@ -516,13 +531,66 @@ windows)
     LOG_FILE_WIN="$(cygpath -w "${INSTALL_DIR}/adb-tunnel-${SAFE_HOST}.log")"
     TASK_NAME="ADBTunnel-${SAFE_HOST}"
 
+    # Guard script: run before EVERY (re)start of the tunnel's ssh, including
+    # the .bat loop's 5-second respawn. Rewritten on every install/auto-update
+    # so it can't drift from this script.
+    #
+    # Why this exists on Windows too, not just macOS: when the tunnel drops,
+    # nothing owns 127.0.0.1:LOCAL_PORT until the loop respawns ssh. If Android
+    # Studio or a stray `adb` call runs in that gap it auto-spawns a LOCAL adb
+    # server on that port. ssh then binds only [::1] (with ExitOnForwardFailure
+    # set, OpenSSH counts a forward as successful if either loopback address
+    # binds), and adb clients on 127.0.0.1 end up talking to a local server that
+    # has never seen the robot. Windows is if anything more exposed than macOS
+    # here, because this loop respawns constantly rather than only on failure.
+    # A non-adb listener is left alone - ssh then fails loudly on its bind.
+    GUARD_PS1="${INSTALL_DIR}/adb-tunnel-guard.ps1"
+    cat > "$GUARD_PS1" <<'GUARD_EOF'
+param([int]$Port)
+# adb-tunnel-guard.ps1 - written by laptop/install.sh, run by the tunnel's
+# .bat before every (re)start of ssh. Windows counterpart of the macOS
+# adb-tunnel-guard.sh.
+$ErrorActionPreference = 'SilentlyContinue'
+$pids = @(Get-NetTCPConnection -State Listen -LocalPort $Port |
+         Select-Object -ExpandProperty OwningProcess -Unique)
+foreach ($procId in $pids) {
+    $proc = Get-Process -Id $procId
+    if (-not $proc -or $proc.ProcessName -ne 'adb') { continue }
+    Write-Output ("{0} adb-tunnel-guard: local adb server (pid {1}) is holding port {2} - shutting it down." -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $procId, $Port)
+    # Ask nicely first - the same request `adb kill-server` sends. Only fall
+    # back to a hard stop if the daemon ignored it.
+    & adb -P $Port kill-server | Out-Null
+    Start-Sleep -Milliseconds 700
+    if (Get-NetTCPConnection -State Listen -LocalPort $Port |
+        Where-Object { $_.OwningProcess -eq $procId }) {
+        Write-Output ("{0} adb-tunnel-guard: pid {1} still holds port {2} - stopping it." -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $procId, $Port)
+        Stop-Process -Id $procId -Force
+        Start-Sleep -Milliseconds 400
+        # Say so if it is STILL there. $ErrorActionPreference hides the reason
+        # Stop-Process failed (usually UAC), and without this the ssh bind that
+        # follows half-fails silently - the exact failure this guard exists to
+        # prevent. Mirrors the macOS guard's final warning.
+        if (Get-NetTCPConnection -State Listen -LocalPort $Port |
+            Where-Object { $_.OwningProcess -eq $procId }) {
+            Write-Output ("{0} adb-tunnel-guard: WARNING - pid {1} still holds port {2} after the stop. Run this installer from an elevated prompt, or close the program using adb." -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $procId, $Port)
+        }
+    }
+}
+exit 0
+GUARD_EOF
+    GUARD_PS1_WIN="$(cygpath -w "$GUARD_PS1")"
+    # Cheap native pre-check so the common case (nothing on the port) does not
+    # pay PowerShell startup cost five times a minute.
+    GUARD_LINE="netstat -ano | findstr /R \":${LOCAL_PORT} .*LISTENING\" >nul 2>&1 && powershell -NoProfile -ExecutionPolicy Bypass -File \"${GUARD_PS1_WIN}\" -Port ${LOCAL_PORT} >> \"${LOG_FILE_WIN}\" 2>&1"
+
     if [ "$AUTH_CHOICE" = "1" ]; then
         WIN_KEY="$(cygpath -w "$KEY")"
         cat > "$WRAPPER_BAT" <<EOF
 @echo off
 :loop
 echo [%date% %time%] starting tunnel to ${REMOTE_HOST} >> "${LOG_FILE_WIN}"
-"${SSH_BIN_WIN}" -i "${WIN_KEY}" -N -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
+${GUARD_LINE}
+"${SSH_BIN_WIN}" -i "${WIN_KEY}" -N -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
 echo [%date% %time%] tunnel exited, restarting in 5s >> "${LOG_FILE_WIN}"
 timeout /t 5 /nobreak >nul
 goto loop
@@ -534,7 +602,8 @@ EOF
 @echo off
 :loop
 echo [%date% %time%] starting tunnel to ${REMOTE_HOST} >> "${LOG_FILE_WIN}"
-"${SSHPASS_BIN_WIN}" -f "${WIN_PASSFILE}" "${SSH_BIN_WIN}" -N -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
+${GUARD_LINE}
+"${SSHPASS_BIN_WIN}" -f "${WIN_PASSFILE}" "${SSH_BIN_WIN}" -N -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
 echo [%date% %time%] tunnel exited, restarting in 5s >> "${LOG_FILE_WIN}"
 timeout /t 5 /nobreak >nul
 goto loop
@@ -663,20 +732,40 @@ if [ "$PLATFORM" = "mac" ]; then
         warning "127.0.0.1:${LOCAL_PORT} is not held by the tunnel's ssh - adb clients on this machine will not reach the bridge."
         HEALTH_OK=0
     fi
+    # Same ownership standard as the adb port above - assert the tunnel's own
+    # ssh holds it, not merely that something is listening. A bare liveness
+    # check passes for a leftover listener from a previous install.
+    #
+    # Deliberately NOT filtered to @127.0.0.1 like the adb port is. These three
+    # forwards are bound without an explicit bind address, so ssh binds them
+    # wildcard and lsof reports "*:8091" - and `lsof -iTCP@127.0.0.1:8091`
+    # does NOT match a wildcard listener (verified: the filter returns nothing).
+    # Filtering here would fail a perfectly healthy tunnel, which under --auto
+    # exits 1 and makes the nightly updater refuse to bump VERSION forever.
+    # The adb check can use @127.0.0.1 only because its forward is explicitly
+    # bound to it.
     for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
-        if ! lsof -iTCP:"$CHECK_PORT" -sTCP:LISTEN -P >/dev/null 2>&1; then
-            warning "port $CHECK_PORT is not listening - tunnel did not come up cleanly."
+        if ! lsof -nP -iTCP:"$CHECK_PORT" -sTCP:LISTEN -Fc 2>/dev/null | grep -qx 'cssh'; then
+            warning "port $CHECK_PORT is not held by the tunnel's ssh - that web tool will not reach the Control Hub."
             HEALTH_OK=0
         fi
     done
 elif [ "$PLATFORM" = "windows" ]; then
     sleep 3
     for CHECK_PORT in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
-        if command -v netstat >/dev/null 2>&1 && ! netstat -ano 2>/dev/null | grep -q ":${CHECK_PORT} .*LISTENING"; then
+        if ! command -v netstat >/dev/null 2>&1 || ! netstat -ano 2>/dev/null | grep -q ":${CHECK_PORT} .*LISTENING"; then
             warning "port $CHECK_PORT is not listening - tunnel did not come up cleanly."
             HEALTH_OK=0
         fi
     done
+    # Listening is not enough on LOCAL_PORT: a rogue local adb server sitting
+    # there reports healthy while adb clients never reach the bridge. Require
+    # the tunnel's own ssh, the same assertion the macOS path makes.
+    LOCAL_LISTENER="$(windows_listener_image "$LOCAL_PORT")"
+    if [ "$LOCAL_LISTENER" != "ssh.exe" ]; then
+        warning "port ${LOCAL_PORT} is held by ${LOCAL_LISTENER:-an unknown process}, not the tunnel's ssh.exe - adb clients will not reach the bridge."
+        HEALTH_OK=0
+    fi
 fi
 # (linux path never starts a live process itself - nothing to health-check.)
 
