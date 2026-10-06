@@ -543,6 +543,18 @@ GUARD_EOF
 </dict>
 </plist>
 EOF
+    # Cap the macOS tunnel logs. launchd appends to these on every ssh
+    # (re)start, so a persistently failing tunnel grows them without bound for
+    # as long as the machine stays up - /tmp is not cleared until reboot. Prune
+    # at install and on every agent start (the guard runs on every respawn, so
+    # hooking it there bounds the file even when nobody reinstalls). Same
+    # keep-the-newest-half approach as the Windows prune script.
+    for mac_log in "/tmp/adbtunnel-${SAFE_HOST}.log" "/tmp/adbtunnel-${SAFE_HOST}.err" "/tmp/adbtunnel-updater.log"; do
+        if [ -f "$mac_log" ] && [ "$(wc -c < "$mac_log" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+            tail -c 2621440 "$mac_log" > "$mac_log.tmp" 2>/dev/null && mv "$mac_log.tmp" "$mac_log"
+            echo "  capped $mac_log to 2.5MB (was over 5MB)"
+        fi
+    done
     launchctl unload "$PLIST" 2>/dev/null || true
     launchctl load "$PLIST"
 
@@ -591,6 +603,28 @@ windows)
     mkdir -p "$INSTALL_DIR"
     WRAPPER_BAT="${INSTALL_DIR}/adb-tunnel-${SAFE_HOST}.bat"
     LOG_FILE_WIN="$(cygpath -w "${INSTALL_DIR}/adb-tunnel-${SAFE_HOST}.log")"
+    # Bound the tunnel log. The .bat appends a line every 5 seconds while the
+    # tunnel is down, so a persistently broken tunnel writes ~17k lines/day and
+    # the file grows forever inside %APPDATA%. Truncate-on-reinstall only helps
+    # if someone reruns the installer, which is exactly what people stop doing
+    # once they trust the thing - so cap the size here instead. Windows has no
+    # logrotate; a scheduled task would be more machinery than this deserves,
+    # so the installer prunes on every run and the .bat prunes on every start.
+    truncate_log_if_large() {
+        local f="$1" max_mb="${2:-5}" max_bytes
+        [ -f "$f" ] || return 0
+        max_bytes=$((max_mb * 1024 * 1024))
+        # stat -c is GNU; the BSD/macOS form is different, but this branch is
+        # Windows-only, where Git Bash ships the GNU coreutils.
+        local size
+        size="$(stat -c %s "$f" 2>/dev/null || echo 0)"
+        if [ "$size" -gt "$max_bytes" ]; then
+            local keep=$((max_bytes / 2))
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] adb-tunnel: log exceeded ${max_mb}MB, keeping newest ${keep} bytes." >> "$f"
+            tail -c "$keep" "$f" > "$f.tmp" 2>/dev/null && mv "$f.tmp" "$f"
+        fi
+    }
+    truncate_log_if_large "${INSTALL_DIR}/adb-tunnel-${SAFE_HOST}.log"
     TASK_NAME="ADBTunnel-${SAFE_HOST}"
 
     # Guard script: run before EVERY (re)start of the tunnel's ssh, including
@@ -643,6 +677,38 @@ GUARD_EOF
     GUARD_PS1_WIN="$(cygpath -w "$GUARD_PS1")"
     # Cheap native pre-check so the common case (nothing on the port) does not
     # pay PowerShell startup cost five times a minute.
+    # Prune the log at the top of every loop iteration, not just at install:
+    # the loop is what runs unattended, so this is the only size bound that
+    # applies while nobody is thinking about Relay.
+    #
+    # The PowerShell is written to a .ps1 rather than inlined. A single-quoted
+    # bash string means $ is never expanded by bash and needs no escaping, and
+    # cmd.exe is not asked to parse quotes and braces - which it does badly, and
+    # which previously produced literal \$f in the generated .bat.
+    PRUNE_PS1="${INSTALL_DIR}/adb-tunnel-prune.ps1"
+    cat > "$PRUNE_PS1" <<'PRUNE_EOF'
+param([string]$Path, [int]$MaxBytes = 5242880)
+# adb-tunnel-prune.ps1 - written by laptop/install.sh, run by the tunnel's .bat
+# on every reconnect attempt. The .bat logs a line every 5 seconds while the
+# tunnel is down, so without this the log grows without bound inside %APPDATA%.
+try {
+    if (-not (Test-Path $Path)) { exit 0 }
+    $len = (Get-Item $Path).Length
+    if ($len -gt $MaxBytes) {
+        $keep = [int]($MaxBytes / 2)
+        $text = [IO.File]::ReadAllText($Path)
+        $tail = $text.Substring([Math]::Max(0, $text.Length - $keep))
+        [IO.File]::WriteAllText($Path, $tail)
+        Add-Content -Path $Path -Value ("{0} adb-tunnel: log exceeded {1} bytes, kept newest {2}." -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $len, $keep)
+    }
+} catch {
+    # Never let log housekeeping break the tunnel.
+    exit 0
+}
+exit 0
+PRUNE_EOF
+    PRUNE_PS1_WIN="$(cygpath -w "$PRUNE_PS1")"
+    PRUNE_LINE="powershell -NoProfile -ExecutionPolicy Bypass -File \"${PRUNE_PS1_WIN}\" -Path \"${LOG_FILE_WIN}\" -MaxBytes 5242880 >> \"${LOG_FILE_WIN}\" 2>&1"
     GUARD_LINE="netstat -ano | findstr /R \":${LOCAL_PORT} .*LISTENING\" >nul 2>&1 && powershell -NoProfile -ExecutionPolicy Bypass -File \"${GUARD_PS1_WIN}\" -Port ${LOCAL_PORT} >> \"${LOG_FILE_WIN}\" 2>&1"
 
     if [ "$AUTH_CHOICE" = "1" ]; then
@@ -651,6 +717,7 @@ GUARD_EOF
 @echo off
 :loop
 echo [%date% %time%] starting tunnel to ${REMOTE_HOST} >> "${LOG_FILE_WIN}"
+${PRUNE_LINE}
 ${GUARD_LINE}
 "${SSH_BIN_WIN}" -i "${WIN_KEY}" -N -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
 echo [%date% %time%] tunnel exited, restarting in 5s >> "${LOG_FILE_WIN}"
@@ -664,6 +731,7 @@ EOF
 @echo off
 :loop
 echo [%date% %time%] starting tunnel to ${REMOTE_HOST} >> "${LOG_FILE_WIN}"
+${PRUNE_LINE}
 ${GUARD_LINE}
 "${SSHPASS_BIN_WIN}" -f "${WIN_PASSFILE}" "${SSH_BIN_WIN}" -N -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
 echo [%date% %time%] tunnel exited, restarting in 5s >> "${LOG_FILE_WIN}"

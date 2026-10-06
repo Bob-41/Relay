@@ -667,6 +667,38 @@ EOF
 
 touch "$LOG_FILE"
 chown "$SERVICE_USER" "$LOG_FILE"
+chmod 640 "$LOG_FILE"   # owner rw, group read; never world-readable
+
+# --- Bound the watchdog log ---
+# The watchdog appends on every state change and every retry. On a bridge that
+# is repeatedly failing (robot off, or a join that will never succeed) that is
+# thousands of lines a day, and /var/log/adb-forwarder.log would grow forever
+# until the filesystem fills. Cap it at install time by installing a logrotate
+# policy. copytruncate is required: the watchdog holds the file open by path,
+# so a rotation that renames it would leave the service writing to the old
+# inode. logrotate is optional - absence must not fail the install.
+if command -v logrotate >/dev/null 2>&1; then
+    cat > /etc/logrotate.d/adb-forwarder <<LOGROTATE_EOF
+# Managed by bridge/install.sh. copytruncate: adb-forwarder-connect.sh appends
+# to this path and holds it open, so it must not be renamed out from under it.
+${LOG_FILE} {
+    weekly
+    rotate 4
+    size 5M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    # `su user group` - logrotate needs both, and SERVICE_USER's own group is
+    # not guaranteed to exist or to be the right one.
+    su ${SERVICE_USER} $(id -gn "$SERVICE_USER" 2>/dev/null || echo root)
+}
+LOGROTATE_EOF
+else
+    important "logrotate not found - ${LOG_FILE} will grow unbounded."
+    important "Install it (sudo apt-get install logrotate / sudo pacman -S logrotate) to cap it."
+fi
 
 # Install the generic watchdog logic (this is what auto-update replaces).
 if [ ! -f "$WATCHDOG_SRC" ]; then

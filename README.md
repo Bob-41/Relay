@@ -193,8 +193,22 @@ authentication, re-run `laptop/install.sh` to update that laptop.
 | --- | --- |
 | Bridge watchdog | `/var/log/adb-forwarder.log`, `journalctl -u adb-forwarder-connect.service` |
 | Bridge ADB server | `journalctl -u adb-forwarder-server.service` |
-| macOS tunnel | `/tmp/adbtunnel-<host>.log` |
+| macOS tunnel | `/tmp/adbtunnel-<host>.log`, `/tmp/adbtunnel-<host>.err` |
+| macOS updater | `/tmp/adbtunnel-updater.log` |
 | Windows tunnel | `%APPDATA%\\adb-tunnel\\adb-tunnel-<host>.log` |
+| Windows updater | `%APPDATA%\\adb-tunnel\\updater.log` |
+
+Logs are capped so they cannot fill the disk. The bridge log rotates weekly at
+5 MB, keeping 4 compressed generations. Laptop logs are trimmed to their newest
+2.5 MB whenever they pass 5 MB - on macOS at install and each time the agent
+restarts, on Windows on every reconnect attempt.
+
+The bridge watchdog logs a line roughly every 5 seconds while it is working and
+says so explicitly when it cannot make progress. If the Control Hub's Wi-Fi never
+appears, it names the likely cause - most often that the chosen Wi-Fi adapter is
+not managed by NetworkManager, which happens when a netplan config claims other
+interfaces but never mentions that one. Fix that from a local console with a
+netplan drop-in, not over SSH on that interface, or the connection will drop.
 
 ## Current limitations
 
