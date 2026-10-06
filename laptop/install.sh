@@ -215,62 +215,109 @@ SAFE_HOST="${REMOTE_HOST//[^a-zA-Z0-9]/_}"
 # would turn a routine nightly update into an outage. The guard script handles
 # the respawn gap in normal operation - this only handles an explicit rerun.
 teardown_previous_install() {
-    local removed=0 pid name check_port killed=0
+    local removed=0 pid name check_port cmdline killed=0
+    # The four forwarded ports are hardcoded constants, never prompted, so a
+    # laptop can only ever hold ONE Relay tunnel - a second registration for
+    # the same ports is always a leftover, never a legitimate second bridge.
+    # Match on the artifact pattern, never on SAFE_HOST: SAFE_HOST is derived
+    # from REMOTE_HOST, so the same machine named two ways (`raspi` vs
+    # `100.105.201.65`) yields two different names, and a name-scoped teardown
+    # silently misses the old one. That is not hypothetical - the README tells
+    # Windows users to switch to the Tailscale IP, so hostname -> IP is a
+    # documented migration. Worse, the nightly updater globs every *.env, so
+    # the missed config gets replayed every night and re-registers the stale
+    # agent. Sweep the whole pattern instead.
     case "$PLATFORM" in
         mac)
-            local prev_plist="$HOME/Library/LaunchAgents/com.adbtunnel.${SAFE_HOST}.plist"
-            if [ -f "$prev_plist" ]; then
-                important "Previous Relay tunnel found for ${REMOTE_HOST} - uninstalling it first."
+            # `com.adbtunnel.updater.plist` is the updater agent, not a tunnel -
+            # never unload it here or nightly updates would stop registering.
+            for prev_plist in "$HOME"/Library/LaunchAgents/com.adbtunnel.*.plist; do
+                case "$(basename "$prev_plist")" in
+                    com.adbtunnel.updater.plist) continue ;;
+                esac
+                [ -f "$prev_plist" ] || continue
+                important "Previous Relay tunnel found ($(basename "$prev_plist" .plist | sed 's/^com.adbtunnel.//')) - uninstalling it first."
                 # Unload BEFORE killing anything below. While the plist is
                 # still loaded, launchd respawns ssh the instant it dies, so a
                 # kill here would just race the agent recreating the tunnel.
                 launchctl unload "$prev_plist" 2>/dev/null || true
                 rm -f "$prev_plist"
                 removed=1
-            fi
-            # lsof is macOS-only here; the Windows equivalent lives in the
-            # PowerShell block further down, which already stops ssh.exe
-            # processes matching this host before it re-registers.
+            done
+            # Reap by PORT, not by name. An ssh holding one of the four forwarded
+            # ports IS a Relay tunnel for this laptop - the ports are
+            # hardcoded, so there is no legitimate second tunnel. Name-scoped
+            # matching would miss a tunnel registered under a different host
+            # string, which is exactly the hostname -> Tailscale IP case.
             #
-            # Check ALL four forwarded ports, not just LOCAL_PORT: with
+            # Check ALL four ports, not just LOCAL_PORT: with
             # ExitOnForwardFailure=yes a stale tunnel ssh holding only 8091
             # still takes the whole new tunnel down, adb forward included.
-            # Only `ssh` is ever killed. A non-ssh listener on one of these
-            # ports is somebody's dev server and is reported, not touched -
-            # same policy as the rogue-adb block below.
+            # Only `ssh` is ever killed, and only when it actually looks like one of
+            # our forwards - never a stranger's ssh tunnel that happens to sit
+            # on 8091. A non-ssh listener is somebody's dev server: reported,
+            # not touched, same policy as the rogue-adb block below.
+            #
+            # LOCAL_PORT is exempt from the command-line test: 5037 is Relay's
+            # by definition (it is the adb port every Android Studio uses), so
+            # any ssh holding it is one of ours. The web ports are only
+            # reaped when the command line shows a Relay forward - the robot
+            # IP, or a localhost forward onto LOCAL_PORT.
+            #
+            # lsof here is macOS-only; the Windows equivalent is the PowerShell
+            # block further down, which stops ssh.exe for this host before it
+            # re-registers.
             for check_port in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
                 for pid in $(lsof -nP -tiTCP:"$check_port" -sTCP:LISTEN 2>/dev/null | sort -u); do
                     name="$(basename "$(ps -p "$pid" -o comm= 2>/dev/null)")"
-                    if [ "$name" = "ssh" ]; then
-                        echo "  stopping stale tunnel ssh (pid $pid) still holding port $check_port"
-                        kill "$pid" 2>/dev/null && killed=1
-                    else
+                    if [ "$name" != "ssh" ]; then
                         important "  NOTE: port $check_port is held by ${name:-unknown} (pid $pid), not ssh - leaving it alone."
+                        continue
                     fi
+                    # Distinguish our own forward from an unrelated ssh tunnel
+                    # on the same port. Under --auto this never runs, so the
+                    # only ssh we can be looking at is one Relay left behind -
+                    # but an interactive rerun must not kill a stranger's
+                    # tunnel just because they picked 8091.
+                    cmdline="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+                    if [ "$check_port" != "$LOCAL_PORT" ] \
+                        && ! printf '%s' "$cmdline" | grep -q -- "$ROBOT_IP" \
+                        && ! printf '%s' "$cmdline" | grep -q "localhost:${REMOTE_PORT}"; then
+                        important "  NOTE: port $check_port is held by an ssh that is not a Relay forward (pid $pid) - leaving it alone."
+                        important "        If the new tunnel fails to bind, stop that ssh and re-run this installer."
+                        continue
+                    fi
+                    echo "  stopping stale tunnel ssh (pid $pid) still holding port $check_port"
+                    kill "$pid" 2>/dev/null && killed=1
                 done
             done
             ;;
         windows)
-            local prev_task="ADBTunnel-${SAFE_HOST}"
-            local startup_dir startup_vbs startup_bat
+            local startup_dir
             startup_dir="$(cygpath -u "$APPDATA")/Microsoft/Windows/Start Menu/Programs/Startup"
-            startup_vbs="${startup_dir}/adb-tunnel-${SAFE_HOST}.vbs"
-            startup_bat="${startup_dir}/adb-tunnel-${SAFE_HOST}.bat"
-            # Unregister up front rather than relying on the registration step
-            # below, so a run that ends up denied elevation does not silently
-            # leave the old task running alongside the new Startup-folder copy.
-            if powershell -NoProfile -ExecutionPolicy Bypass -Command \
-                "if (Get-ScheduledTask -TaskName '${prev_task}' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }" 2>/dev/null; then
+            # Same sweep as macOS: match the task/Startup patterns, never
+            # SAFE_HOST. ADBTunnelUpdater is the updater task, not a tunnel -
+            # never unregister it here.
+            local prev_task
+            for prev_task in $(powershell -NoProfile -ExecutionPolicy Bypass -Command \
+                "Get-ScheduledTask -TaskName 'ADBTunnel*' -ErrorAction SilentlyContinue | ForEach-Object { \$_.TaskName }" 2>/dev/null); do
+                case "$prev_task" in
+                    ADBTunnelUpdater) continue ;;
+                esac
                 important "Previous Relay tunnel task '${prev_task}' found - uninstalling it first."
                 powershell -NoProfile -ExecutionPolicy Bypass -Command \
                     "Unregister-ScheduledTask -TaskName '${prev_task}' -Confirm:\$false -ErrorAction SilentlyContinue" >/dev/null 2>&1 || true
                 removed=1
-            fi
-            if [ -f "$startup_vbs" ] || [ -f "$startup_bat" ]; then
+            done
+            # Unregister up front rather than relying on the registration step
+            # below, so a run that ends up denied elevation does not silently
+            # leave the old task running alongside the new Startup-folder copy.
+            for prev_entry in "$startup_dir"/adb-tunnel-*.vbs "$startup_dir"/adb-tunnel-*.bat; do
+                [ -f "$prev_entry" ] || continue
                 [ "$removed" = "1" ] || important "Previous Relay Startup-folder entry found - uninstalling it first."
-                rm -f "$startup_vbs" "$startup_bat"
+                rm -f "$prev_entry"
                 removed=1
-            fi
+            done
             ;;
         linux)
             # Plain Linux installs no persistence at all - the installer only
@@ -278,6 +325,21 @@ teardown_previous_install() {
             # registered here to tear down.
             ;;
     esac
+    # Stale saved configs for the same ports. The nightly updater globs
+    # ${CONFIG_ROOT}/*.env and replays each one, so a config left behind by a
+    # differently-named host would re-register its agent every night and undo
+    # the teardown above - the tunnel would come back on its own. Keep only the
+    # config this run is writing.
+    local stale_cfg current_cfg
+    current_cfg="${CONFIG_ROOT}/${SAFE_HOST}.env"
+    for stale_cfg in "$CONFIG_ROOT"/*.env; do
+        [ -e "$stale_cfg" ] || continue
+        [ "$stale_cfg" = "$current_cfg" ] && continue
+        echo "  removing stale config $(basename "$stale_cfg") (would be replayed by the nightly updater)"
+        rm -f "$stale_cfg"
+        removed=1
+    done
+
     [ "$removed" = "1" ] && echo "Previous install removed. Continuing with a fresh install."
     [ "$killed" = "1" ] && sleep 1   # let the kernel release the listening socket
     return 0
@@ -737,13 +799,17 @@ if [ "$PLATFORM" = "mac" ]; then
     # check passes for a leftover listener from a previous install.
     #
     # Deliberately NOT filtered to @127.0.0.1 like the adb port is. These three
-    # forwards are bound without an explicit bind address, so ssh binds them
-    # wildcard and lsof reports "*:8091" - and `lsof -iTCP@127.0.0.1:8091`
-    # does NOT match a wildcard listener (verified: the filter returns nothing).
-    # Filtering here would fail a perfectly healthy tunnel, which under --auto
-    # exits 1 and makes the nightly updater refuse to bump VERSION forever.
-    # The adb check can use @127.0.0.1 only because its forward is explicitly
-    # bound to it.
+    # forwards are declared without a bind address, so ssh binds BOTH loopback
+    # addresses - 127.0.0.1 and [::1] (verified locally against a
+    # dual-loopback listener: the @127.0.0.1 filter matches the IPv4 one).
+    # Omitting the filter costs nothing on a healthy tunnel, and it avoids
+    # depending on that dual-bind detail: if a forward ever ends up bound only
+    # on [::1], this check should flag it rather than pass.
+    #
+    # Never add an address filter here without testing it on a live tunnel
+    # first. Under --auto a failed health check exits 1, which makes the nightly
+    # updater refuse to bump VERSION - so a filter that false-fails on a healthy
+    # tunnel would silently stop all updates.
     for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
         if ! lsof -nP -iTCP:"$CHECK_PORT" -sTCP:LISTEN -Fc 2>/dev/null | grep -qx 'cssh'; then
             warning "port $CHECK_PORT is not held by the tunnel's ssh - that web tool will not reach the Control Hub."
