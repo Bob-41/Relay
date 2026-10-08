@@ -50,9 +50,14 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
 iface_is_managed() {
     # nmcli general status prints "GENERAL.STATE" per device; a managed device
     # reports "connected"/"connecting"/"disconnected"/"unavailable". An
-    # unmanaged device is simply absent from that list.
+    # unmanaged device is either simply absent from that list, or listed with
+    # STATE "unmanaged" on newer NetworkManager - treat both as unmanaged,
+    # because the difference between those two spellings decides whether the
+    # diagnosis below is "no profile can ever activate" or "the hub is off".
     nmcli -t -f DEVICE,STATE device status 2>/dev/null \
-        | awk -F: -v d="$WIFI_IFACE" '$1 == d { found = 1 } END { exit !found }'
+        | awk -F: -v d="$WIFI_IFACE" '
+            $1 == d { found = 1; if ($2 == "unmanaged") bad = 1 }
+            END { exit !(found && !bad) }'
 }
 
 wait_for_adb_server() {
@@ -152,7 +157,18 @@ connect_adb() {
 }
 
 is_adb_alive() {
-    adb -H 127.0.0.1 -P "$ADB_PORT" -s "$DEVICE_IP:$DEVICE_PORT" get-state >/dev/null 2>&1
+    # `get-state` exits 0 for states that are emphatically not "ready":
+    # `offline` (radio link or hub rebooting) and `unauthorized` (ADB
+    # debugging prompt never accepted on the hub) both return success. Treating
+    # exit status alone as liveness therefore reported a healthy bridge while
+    # laptops could not deploy, and - worse - skipped the reconnect that would
+    # have fixed it. Compare the reported state to `device`, which is the only
+    # value that means adb can actually talk to the hub.
+    [ "$(adb -H 127.0.0.1 -P "$ADB_PORT" -s "$DEVICE_IP:$DEVICE_PORT" get-state 2>/dev/null)" = "device" ]
+}
+
+adb_state() {
+    adb -H 127.0.0.1 -P "$ADB_PORT" -s "$DEVICE_IP:$DEVICE_PORT" get-state 2>/dev/null
 }
 
 is_wifi_connected() {
@@ -178,6 +194,14 @@ while true; do
         sleep 3
     fi
     if ! is_adb_alive; then
+        # Say what state the hub is actually in when there is one to say. An
+        # `unauthorized` hub is a different problem from a dead radio link, and
+        # the operator seeing "unauthorized" at 2am can fix it in ten seconds
+        # while "unreachable" sends them looking at Wi-Fi instead.
+        case "$(adb_state)" in
+            unauthorized) log "adb reports '${DEVICE_IP}:${DEVICE_PORT}' is unauthorized - accept the ADB debugging prompt on the Control Hub screen." ;;
+            offline)      log "adb reports '${DEVICE_IP}:${DEVICE_PORT}' is offline - the link is up but the hub is not answering." ;;
+        esac
         connect_adb || true
     else
         # Only log a healthy tick occasionally, not every 5 seconds, or the log

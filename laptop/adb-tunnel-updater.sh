@@ -5,6 +5,11 @@
 # if the repo's VERSION file increased. Downloads are syntax-checked before
 # anything touches the running tunnel; any failure leaves the current
 # install untouched.
+#
+# "Increased" is literal. Comparing with != also fires when the repo's VERSION
+# is *lower* than what is installed, so reverting a bad bump on main would
+# silently roll every laptop backwards - the exact opposite of what the
+# script says it does.
 
 set -uo pipefail
 
@@ -25,6 +30,22 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [updater] $*" | tee -a "$LOG_FILE"; }
 
+# True when $1 is strictly newer than $2. Both must parse as a version, so a
+# merge-conflict marker or an HTML error page in VERSION can only ever block an
+# update - never be mistaken for one.
+version_is_parseable() {
+    printf '%s' "$1" | grep -qE '^[vV]?[0-9]+([._-][0-9]+)*$'
+}
+
+version_newer() {
+    local a="$1" b="$2"
+    version_is_parseable "$a" && version_is_parseable "$b" || return 1
+    a="${a#[vV]}"
+    b="${b#[vV]}"
+    [ "$a" != "$b" ] || return 1
+    [ "$(printf '%s\n%s\n' "$a" "$b" | sort -V 2>/dev/null | head -n1)" = "$b" ]
+}
+
 REMOTE_VERSION="$(curl -fsSL --max-time 15 "${REPO_RAW}/VERSION" 2>/dev/null)"
 if [ -z "$REMOTE_VERSION" ]; then
     log "Could not fetch remote VERSION - skipping."
@@ -34,6 +55,11 @@ LOCAL_VERSION="0"
 [ -f "$STATE_FILE" ] && LOCAL_VERSION="$(cat "$STATE_FILE")"
 if [ "$REMOTE_VERSION" = "$LOCAL_VERSION" ]; then
     log "Already at VERSION ${LOCAL_VERSION}. Nothing to do."
+    exit 0
+fi
+if ! version_newer "$REMOTE_VERSION" "$LOCAL_VERSION"; then
+    log "Repo VERSION (${REMOTE_VERSION}) is not newer than this laptop's (${LOCAL_VERSION}) - skipping."
+    log "A reverted or re-pinned VERSION must not roll this laptop backwards."
     exit 0
 fi
 
@@ -62,7 +88,20 @@ done
 
 if [ "$FAILED" = "0" ]; then
     echo "$REMOTE_VERSION" > "$STATE_FILE"
-    cp "${TMP_DIR}/adb-tunnel-updater.sh" "$0" 2>/dev/null || true
+    # Refresh this script by rename, never by overwriting it in place. bash has
+    # the old file open and reads it lazily by byte offset; `cp new "$0"` while
+    # the new version is longer than the old one makes the running process
+    # continue executing from the middle of unrelated bytes. Only bites when the
+    # updater itself changed, which is exactly when it must not.
+    SELF_DIR="$(dirname "$0")"
+    if cp "${TMP_DIR}/adb-tunnel-updater.sh" "${SELF_DIR}/.adb-tunnel-updater.sh.new.$$" 2>/dev/null \
+        && chmod 755 "${SELF_DIR}/.adb-tunnel-updater.sh.new.$$" 2>/dev/null \
+        && mv -f "${SELF_DIR}/.adb-tunnel-updater.sh.new.$$" "$0"; then
+        log "Refreshed ${0}."
+    else
+        rm -f "${SELF_DIR}/.adb-tunnel-updater.sh.new.$$" 2>/dev/null || true
+        log "WARNING: could not refresh ${0} - this copy stays as-is until the next VERSION bump."
+    fi
     log "Update to VERSION ${REMOTE_VERSION} applied successfully."
 else
     log "One or more tunnels failed to update - VERSION not bumped, will retry next run."

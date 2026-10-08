@@ -224,16 +224,23 @@ ensure_box64_amd64_libs() {
     # Extract only - never `apt-get install` amd64 libc onto the host (that
     # fights Raspberry Pi OS's patched arm64 libc). Matches the 2026-09-14
     # decision: apt-get download + dpkg -x into /opt/box64-libs.
-    local tmp codename list_file have_libc=0 have_libgcc=0
+    #
+    # Everything this function does to apt's global state (a foreign
+    # architecture, a temporary mirror line) is undone before it returns, on the
+    # failure path too. Neither may outlive the call: a leftover
+    # `dpkg --add-architecture amd64` contradicts this project's own rule about
+    # not registering amd64 on a Pi, and a leftover mirror line pointing at an
+    # archive that does not exist makes every later `apt update` on that host
+    # fail with "Release file not found" - a broken bridge from a step that was
+    # only ever trying to help.
+    local tmp codename list_file arch_added=0 download_ok=0
+    local os_id apt_amd64_url
     if [ -e "${BOX64_LIBS_DIR}/lib/x86_64-linux-gnu/libc.so.6" ] \
         || [ -e "${BOX64_LIBS_DIR}/usr/lib/x86_64-linux-gnu/libc.so.6" ]; then
-        have_libc=1
+        return 0
     fi
     if [ -e "${BOX64_LIBS_DIR}/lib/x86_64-linux-gnu/libgcc_s.so.1" ] \
         || [ -e "${BOX64_LIBS_DIR}/usr/lib/x86_64-linux-gnu/libgcc_s.so.1" ]; then
-        have_libgcc=1
-    fi
-    if [ "$have_libc" = "1" ] && [ "$have_libgcc" = "1" ]; then
         return 0
     fi
     important "Extracting amd64 glibc/libgcc into ${BOX64_LIBS_DIR} for box64..."
@@ -247,40 +254,68 @@ ensure_box64_amd64_libs() {
     # space removed immediately after, so this doesn't widen anything real.
     chmod 1777 "$tmp"
     list_file="/etc/apt/sources.list.d/relay-amd64-download.list"
+    os_id="$(. /etc/os-release 2>/dev/null; echo "${ID:-unknown}")"
     codename="$(. /etc/os-release 2>/dev/null; echo "${VERSION_CODENAME:-bookworm}")"
 
     if ! dpkg --print-foreign-architectures 2>/dev/null | grep -qx amd64; then
-        dpkg --add-architecture amd64
+        arch_added=1
     fi
     # Ensure amd64 packages are fetchable even when the OS mirror is arm-only.
+    # The archive must match the distro: deb.debian.org has no `noble`/`jammy`
+    # suite at all, so a hardcoded Debian line on Ubuntu fails every apt call on
+    # the host until it is removed by hand.
     if ! grep -Rqs 'arch=amd64' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
-        printf 'deb [arch=amd64] http://deb.debian.org/debian %s main\n' "$codename" > "$list_file"
-    fi
-    apt-get update
-    if ! (cd "$tmp" && apt-get download libc6:amd64 libgcc-s1:amd64); then
-        # Older suites used libgcc1 instead of libgcc-s1.
-        if ! (cd "$tmp" && apt-get download libc6:amd64 libgcc1:amd64); then
+        case "$os_id" in
+            debian|raspbian|rpi)  apt_amd64_url="http://deb.debian.org/debian" ;;
+            ubuntu)               apt_amd64_url="http://ports.ubuntu.com/ubuntu-ports" ;;
+            *)                    apt_amd64_url="" ;;
+        esac
+        if [ -z "$apt_amd64_url" ]; then
             rm -rf "$tmp"
-            rm -f "$list_file"
-            warning "Failed to download amd64 libc/libgcc debs."
+            warning "No known amd64 package archive for distro '${os_id}' (${codename})."
+            important "Fetch libc6/libgcc-s1 for amd64 by hand into ${BOX64_LIBS_DIR} (dpkg -x), or install adb manually."
             return 1
         fi
+        printf 'deb [arch=amd64] %s %s main\n' "$apt_amd64_url" "$codename" > "$list_file"
     fi
-    if ! compgen -G "$tmp"/*.deb > /dev/null; then
-        rm -rf "$tmp"
-        rm -f "$list_file"
+    # Registered last, so every early return above happens while apt is still
+    # untouched. The matching --remove-architecture below covers every other
+    # exit path.
+    if [ "$arch_added" = "1" ]; then
+        dpkg --add-architecture amd64
+    fi
+
+    if apt-get update >/dev/null 2>&1 \
+        && ( cd "$tmp" && apt-get download libc6:amd64 libgcc-s1:amd64 ) 2>/dev/null; then
+        download_ok=1
+    elif ( cd "$tmp" && apt-get download libc6:amd64 libgcc1:amd64 ) 2>/dev/null; then
+        # Older suites used libgcc1 instead of libgcc-s1.
+        download_ok=1
+    fi
+
+    if [ "$download_ok" != "1" ]; then
+        warning "Failed to download amd64 libc/libgcc debs."
+    elif ! compgen -G "$tmp"/*.deb >/dev/null; then
         warning "apt-get download reported success but no .deb files were found in ${tmp}."
-        return 1
+    else
+        mkdir -p "$BOX64_LIBS_DIR"
+        local deb
+        for deb in "$tmp"/*.deb; do
+            [ -e "$deb" ] || continue
+            dpkg -x "$deb" "$BOX64_LIBS_DIR"
+        done
     fi
-    mkdir -p "$BOX64_LIBS_DIR"
-    local deb
-    for deb in "$tmp"/*.deb; do
-        dpkg -x "$deb" "$BOX64_LIBS_DIR"
-    done
+
+    # Undo every global apt change before branching, including on failure.
     rm -rf "$tmp"
     rm -f "$list_file"
-    # Refresh apt indices without the temporary amd64 mirror line.
+    if [ "$arch_added" = "1" ]; then
+        dpkg --remove-architecture amd64 >/dev/null 2>&1 \
+            || warning "Could not remove the temporary amd64 foreign architecture - check: dpkg --print-foreign-architectures"
+    fi
     apt-get update >/dev/null 2>&1 || true
+
+    [ "$download_ok" = "1" ] || return 1
     # dpkg -x into an empty tree with no merged-/usr symlink puts everything
     # under usr/lib/x86_64-linux-gnu, not lib/x86_64-linux-gnu - check both,
     # matching the libgcc check above and BOX64_LD_LIBRARY_PATH below.
@@ -566,22 +601,62 @@ else
         describe_wifi_adapter "$iface" "$recommendation"
     done
     read -rp "WiFi interface to join the robot wifi: " WIFI_IFACE
-    [ -z "$WIFI_IFACE" ] && { echo "Aborting."; exit 1; }
-    # Dedicating this machine's only network interface to the robot AP means
-    # it loses every other network path the instant it joins - including
-    # whatever is carrying this very SSH session. A single-radio laptop
-    # cannot stay remotely reachable the way the reference Pi bridge does
-    # (two WiFi radios: one for the robot AP, one for admin/Tailscale).
-    # Refuse rather than let that surprise someone after the fact.
+    [ -z "$WIFI_IFACE" ] || printf '%s' "$WIFI_IFACE" | grep -qE '^[A-Za-z0-9._-]+$' \
+        || { echo "Not a valid interface name: ${WIFI_IFACE}. Aborting."; exit 1; }
+
+    # An unmanaged interface can never join anything. NetworkManager leaves a
+    # device unmanaged when another renderer (typically netplan) claims the
+    # host without listing it, and `nmcli connection add` will happily create a
+    # profile for it that can never activate. That is the single most common
+    # "Relay installed fine and then did nothing" failure, and it used to be
+    # discovered hours later from the watchdog log. Catch it here.
+    wifi_iface_state() {
+        nmcli -t -f DEVICE,STATE device status 2>/dev/null \
+            | awk -F: -v d="$WIFI_IFACE" '$1 == d { print $2; exit }'
+    }
+    WIFI_STATE="$(wifi_iface_state)"
+    if [ -z "$WIFI_STATE" ] || [ "$WIFI_STATE" = "unmanaged" ]; then
+        echo "FATAL: NetworkManager does not manage ${WIFI_IFACE} (state: ${WIFI_STATE:-not listed})."
+        echo "A connection profile for it can be created but will never activate, so"
+        echo "the bridge would sit there 'installed' and never see the Control Hub."
+        echo ""
+        echo "On a netplan host, add a drop-in from a LOCAL console - not over SSH on"
+        echo "this interface, which drops the lease:"
+        echo "  sudo sh -c 'printf \"network:\\n  version: 2\\n  wifis:\\n    ${WIFI_IFACE}:\\n      renderer: NetworkManager\\n\" > /etc/netplan/99-relay.yaml'"
+        echo "  sudo netplan apply"
+        echo ""
+        echo "Type NM to continue anyway (Relay will not be able to join the robot"
+        echo "WiFi), anything else aborts:"
+        read -rp "> " UNMANAGED_OVERRIDE
+        [ "$UNMANAGED_OVERRIDE" = "NM" ] || { echo "Aborting."; exit 1; }
+    fi
+
+    # Dedicating this machine's only *working* network path to the robot AP means
+    # it loses everything else the instant it joins - including whatever is
+    # carrying this very SSH session. A single-radio laptop cannot stay remotely
+    # reachable the way the reference Pi bridge does (two WiFi radios: one for
+    # the robot AP, one for admin/Tailscale). Refuse rather than let that surprise
+    # someone after the fact.
+    #
+    # "Other interface" means other *usable* interface: connected or connecting,
+    # not merely enumerated. nmcli reports `unavailable` for a wired port with no
+    # cable and `disconnected` for an idle radio; counting either of those passes
+    # this check today and then the bridge loses its uplink anyway the moment it
+    # joins - the false success this replaces.
     OTHER_IFACES=()
-    while IFS=: read -r iface type; do
+    while IFS=: read -r iface type state; do
         [ "$iface" = "$WIFI_IFACE" ] && continue
+        [ -n "$iface" ] || continue
+        case "$state" in
+            connected*|connecting*) ;;
+            *) continue ;;
+        esac
         case "$type" in
             wifi|ethernet) OTHER_IFACES+=("$iface") ;;
         esac
-    done < <(nmcli -t -f DEVICE,TYPE device)
+    done < <(nmcli -t -f DEVICE,TYPE,STATE device status)
     if [ "${#OTHER_IFACES[@]}" -eq 0 ]; then
-        echo "FATAL: ${WIFI_IFACE} is the only network interface on this machine."
+        echo "FATAL: ${WIFI_IFACE} is the only connected network interface on this machine."
         echo "Joining the robot's WiFi on it will disconnect this machine from"
         echo "everything else, including whatever is carrying this SSH session,"
         echo "with no fallback path to reach it again remotely."
@@ -597,6 +672,39 @@ else
             exit 1
         fi
         echo "Continuing on a single interface - remote access will NOT survive joining the robot's WiFi."
+    fi
+
+    # The interface count is necessary but not sufficient: a second adapter that
+    # is merely *present* does not stop the chosen one from carrying this very
+    # session, and it is the chosen interface whose profile we are about to
+    # change. Ask the routing table directly - if the default route or the live
+    # SSH connection runs over WIFI_IFACE, joining the robot AP on it is the
+    # exact failure described above, whatever else is plugged in.
+    route_dev_for() {
+        ip route get "$1" 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }'
+    }
+    DEFAULT_DEV="$(route_dev_for 1.1.1.1)"
+    SESSION_DEV=""
+    SSH_PEER="${SSH_CONNECTION%% *}"
+    [ -n "$SSH_PEER" ] && SESSION_DEV="$(route_dev_for "$SSH_PEER")"
+    if [ "$DEFAULT_DEV" = "$WIFI_IFACE" ] || [ "$SESSION_DEV" = "$WIFI_IFACE" ]; then
+        REASON=""
+        [ "$SESSION_DEV" = "$WIFI_IFACE" ] && REASON="your current SSH session runs over ${WIFI_IFACE}"
+        [ "$DEFAULT_DEV" = "$WIFI_IFACE" ] && REASON="${REASON:+$REASON and }the default route runs over ${WIFI_IFACE}"
+        echo "FATAL: ${REASON}."
+        echo "This is the interface you asked Relay to join to the robot's WiFi, so"
+        echo "the bridge will drop off every other network - including Tailscale and"
+        echo "the session you would use to recover it."
+        echo "Use the other adapter as the robot interface, or move the uplink"
+        echo "(Tailscale/home Wi-Fi/Ethernet) onto it first, then re-run this installer."
+        echo ""
+        echo "Type DEV to continue anyway, anything else aborts:"
+        read -rp "> " ROUTE_OVERRIDE
+        if [ "$ROUTE_OVERRIDE" != "DEV" ]; then
+            echo "Aborting."
+            exit 1
+        fi
+        important "Continuing: ${WIFI_IFACE} is carrying your uplink. Remote access will NOT survive joining the robot's WiFi."
     fi
     read -rp "Robot wifi SSID: " TARGET_SSID
     [ -z "$TARGET_SSID" ] && { echo "Aborting."; exit 1; }
@@ -629,6 +737,15 @@ else
         nmcli connection modify "$TARGET_SSID" wifi-sec.key-mgmt none
     fi
     nmcli connection modify "$TARGET_SSID" connection.interface-name "$WIFI_IFACE" connection.autoconnect yes
+    # Never let the robot AP own this host's default route. A Control Hub in AP
+    # mode hands out DHCP on 192.168.43.0/24 and most AP firmware supplies a
+    # gateway address, so joining it can install `default via 192.168.43.1` with
+    # NetworkManager's wifi metric - which beats the home/Ethernet uplink that
+    # is carrying Tailscale and this SSH session. The result is a bridge that
+    # looks connected to the robot and has lost every path off the robot
+    # network, including the way you'd use to fix it. The robot network needs
+    # no gateway at all: the hub is reached at a fixed address on-link.
+    nmcli connection modify "$TARGET_SSID" ipv4.never-default yes ipv6.never-default yes
 
     # Persist config for --auto replay. Deliberately excludes WIFI_PASS -
     # it already lives in NetworkManager's own 600-permission keyfile;
@@ -643,10 +760,10 @@ ADB_PORT="${ADB_PORT}"
 LOG_FILE="${LOG_FILE}"
 REACH_IP="${REACH_IP}"
 EOF
-    # The watchdog runs as SERVICE_USER, so it must own this mode-600 config.
-    # WIFI_PASS is not stored here; NetworkManager keeps that secret separately.
-    chown "$SERVICE_USER":"$SERVICE_USER" "$CONFIG_FILE"
-    chmod 600 "$CONFIG_FILE"
+    # Ownership and mode are set once, in the common section below
+    # (root:service-group 0640). Root `source`s this file on --auto, so it must
+    # never be writable by the unprivileged service account. WIFI_PASS is not
+    # stored here; NetworkManager keeps that secret separately.
 fi
 
 # --- From here on, runs identically whether interactive or --auto ---
@@ -656,14 +773,52 @@ source "$CONFIG_FILE"
 
 POLKIT_RULE="/etc/polkit-1/rules.d/50-adb-forwarder-nm.rules"
 mkdir -p "$(dirname "$POLKIT_RULE")"
+# Grant exactly one action, not the whole org.freedesktop.NetworkManager.*
+# namespace. The prefix match this replaces handed the service account
+# passwordless power control of every interface on the host (networking.disable,
+# wifi.disable, settings.modify.system, shared - i.e. a trivial route to root on
+# any machine where that account is *not* already a sudoer). The watchdog only
+# ever activates one profile: nmcli connection up/down is network-control.
 cat > "$POLKIT_RULE" <<EOF
 polkit.addRule(function(action, subject) {
-    if (action.id.indexOf("org.freedesktop.NetworkManager.") == 0 &&
+    if (action.id == "org.freedesktop.NetworkManager.network-control" &&
         subject.user == "${SERVICE_USER}") {
         return polkit.Result.YES;
     }
 });
 EOF
+
+# config.env is sourced by root on --auto (this script) and read by the watchdog
+# as SERVICE_USER. It must therefore be writable by neither: a service account
+# that can rewrite it can hand root arbitrary shell through `source`. Root owns
+# the file; the service user gets read access through its own group. It holds no
+# Wi-Fi password (NetworkManager keeps that), but root-sourcing it is still
+# arbitrary code execution, which is the whole point of writing it root-owned.
+CONFIG_GROUP="$(id -gn "$SERVICE_USER" 2>/dev/null || echo root)"
+chown root:"$CONFIG_GROUP" "$CONFIG_FILE"
+chmod 640 "$CONFIG_FILE"
+
+# Enforce never-default on the robot profile on EVERY run, including --auto,
+# rather than only when it is first created. Deliberate exception to "the Wi-Fi
+# connection profile is left untouched on --auto": this property is the
+# difference between a bridge that keeps Tailscale and one that goes dark the
+# moment the Control Hub is powered on, and an unattended --auto run is exactly
+# when nobody is watching to notice. Idempotent, and touches no credential.
+if nmcli -t -f NAME connection show 2>/dev/null | grep -Fxq "$TARGET_SSID"; then
+    NEVER_DEFAULT_WAS="$(nmcli -g ipv4.never-default connection show "$TARGET_SSID" 2>/dev/null | head -n1)"
+    if [ "$NEVER_DEFAULT_WAS" != "yes" ]; then
+        if nmcli connection modify "$TARGET_SSID" ipv4.never-default yes ipv6.never-default yes; then
+            important "Robot profile '${TARGET_SSID}': set ipv4/ipv6.never-default=yes (was '${NEVER_DEFAULT_WAS:-unknown}')."
+            important "  Without this, the Control Hub's DHCP gateway can become this host's default route"
+            important "  and drop Tailscale/SSH. Confirm with: ip route"
+        else
+            warning "Could not set never-default on '${TARGET_SSID}'. Check 'ip route' after joining the robot Wi-Fi -"
+            warning "  a default route via ${DEVICE_IP} will break every path off the robot network."
+        fi
+    fi
+else
+    warning "NetworkManager profile '${TARGET_SSID}' not found - skipping the never-default check."
+fi
 
 touch "$LOG_FILE"
 chown "$SERVICE_USER" "$LOG_FILE"
@@ -726,14 +881,23 @@ fi
 
 cat > /etc/systemd/system/adb-forwarder-server.service <<EOF
 [Unit]
-Description=Shared adb server bound to all interfaces (LAN-visible)
+Description=Shared adb server (reachable only over SSH-forwarded localhost)
 
 [Service]
 Type=simple
 # Absolute path: do not rely on PATH when the unit is started by systemd.
 # When using the box64 wrapper this is /usr/local/bin/adb; apt's
 # /usr/bin/adb remains installed as a manual rollback.
-ExecStart=${ADB_BIN} -a -P ${ADB_PORT} nodaemon server
+#
+# Deliberately NOT \`-a\`. An adb server started with -a listens on every
+# interface with no authentication whatsoever: anyone on the LAN can run
+# \`adb -H <bridge-ip> -P ${ADB_PORT} shell\` against the robot, and Relay's
+# Control Hub web interface has no auth either. Nothing in the design needs it -
+# laptops reach this server through an SSH tunnel to the bridge's *localhost*,
+# and the watchdog below talks to it over 127.0.0.1 as well. Without -a adb binds
+# loopback only, which is the same exposure SSH already provides and nothing
+# more. Verify after any change with: ss -ltn | grep ${ADB_PORT}
+ExecStart=${ADB_BIN} -P ${ADB_PORT} nodaemon server
 Restart=always
 RestartSec=3
 User=${SERVICE_USER}
@@ -762,7 +926,7 @@ WantedBy=multi-user.target
 EOF
 
 systemctl daemon-reload
-NEW_SERVER_EXEC="${ADB_BIN} -a -P ${ADB_PORT} nodaemon server"
+NEW_SERVER_EXEC="${ADB_BIN} -P ${ADB_PORT} nodaemon server"
 SERVER_NEEDS_RESTART=0
 if [ "$AUTO" != "1" ] || [ "$ADB_BIN_CHANGED" = "1" ] || [ "$PREV_SERVER_EXEC" != "$NEW_SERVER_EXEC" ]; then
     SERVER_NEEDS_RESTART=1
@@ -825,8 +989,16 @@ if [ "$AUTO" != "1" ]; then
     if [ "$ADB_BIN" = "$ADB_WRAPPER" ]; then
         echo "apt adb left in place for rollback: /usr/bin/adb ($(adb_version_number /usr/bin/adb))"
     fi
+    # Print the actual bind address, not just "something is listening". This is
+    # the check that proves the shared adb server is loopback-only: a `*:PORT`
+    # or `0.0.0.0:PORT` line here means the server is LAN-reachable again.
     if ss -ltn 2>/dev/null | grep -q ":${ADB_PORT} "; then
-        echo "Port ${ADB_PORT} is bound and listening."
+        ADB_LISTEN="$(ss -ltn 2>/dev/null | awk -v p=":${ADB_PORT}$" '$4 ~ p { print $4; exit }')"
+        echo "Port ${ADB_PORT} is bound and listening (${ADB_LISTEN:-address unknown})."
+        case "$ADB_LISTEN" in
+            127.0.0.1:*|\[::1\]:*) ;;
+            *) warning "Bound to ${ADB_LISTEN:-an unknown address} instead of loopback - the shared adb server is reachable by anyone on this network. Check ExecStart in adb-forwarder-server.service (no -a)." ;;
+        esac
     else
         warning "Port ${ADB_PORT} not listening yet. Check: systemctl status adb-forwarder-server.service"
     fi
@@ -841,6 +1013,7 @@ if [ "$AUTO" != "1" ]; then
     echo "(plain LAN IP for reference: ${LAN_IP:-unknown})"
     echo ""
     echo "Logs: ${LOG_FILE}  |  journalctl -u adb-forwarder-connect.service"
-    echo "Auto-update: checks nightly ~03:00, applies only if VERSION in the repo"
-    echo "increased, syntax-checks before installing, restarts only the watchdog."
+    echo "Auto-update: checks nightly ~03:00, applies only when VERSION in the repo has"
+    echo "increased, syntax-checks first, then rolls itself back if the bridge is not"
+    echo "healthy afterwards. Report-only mode: echo manual > /etc/adb-forwarder/update-policy"
 fi

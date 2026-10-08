@@ -106,7 +106,17 @@ else
     [ -z "$REMOTE_HOST" ] && { echo "Aborting."; exit 1; }
     read -rp 'Remote username (username that you use to log into the remote host ex: "bob" if you log in as bob): ' REMOTE_USER
     [ -z "$REMOTE_USER" ] && { echo "Aborting."; exit 1; }
-    REMOTE_PORT="5037"
+    # The bridge asks for the port its shared adb server listens on and prints
+    # it at the end of setup ("host: ... user: ... port: ..."). Ask for it here
+    # too: silently forwarding 5037 to a bridge running on any other port is a
+    # tunnel that comes up cleanly, reports healthy, and shows no device - the
+    # most expensive kind of "it works" in this project.
+    read -rp "Remote adb server port (as printed by the bridge installer) [5037]: " REMOTE_PORT
+    REMOTE_PORT="${REMOTE_PORT:-5037}"
+    # LOCAL_PORT stays hardcoded: Android Studio and every adb client on this
+    # laptop look for the server on 5037 and nothing makes them look elsewhere.
+    # If the laptop's own adb port needs to differ, that is a client-side
+    # problem, not something a tunnel can solve.
     LOCAL_PORT="5037"
 
     # Control Hub AP mode always assigns itself this address - it's a
@@ -149,9 +159,19 @@ else
         if [ "$PLATFORM" != "windows" ] && command -v ssh-copy-id >/dev/null 2>&1; then
             ssh-copy-id -i "${KEY}.pub" -o StrictHostKeyChecking=accept-new "${REMOTE_USER}@${REMOTE_HOST}"
         else
-            PUBKEY="$(cat "${KEY}.pub")"
-            ssh -o StrictHostKeyChecking=accept-new "${REMOTE_USER}@${REMOTE_HOST}" \
-                "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '${PUBKEY}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+            # Windows (and any shell without ssh-copy-id) takes this path. The
+            # old `echo '<key>' >> authorized_keys` appended unconditionally, so
+            # every rerun added another copy of the same line - which is where a
+            # bridge's authorized_keys grows three copies of one person's key and
+            # nobody knows why. Pipe the key in on stdin and let the remote side
+            # decide: no shell-escaping of a comment field that may contain
+            # quotes, and no duplicates.
+            if ! ssh -o StrictHostKeyChecking=accept-new "${REMOTE_USER}@${REMOTE_HOST}" \
+                'mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && key="$(cat)" && if grep -qxF "$key" ~/.ssh/authorized_keys 2>/dev/null; then echo "key already present, not adding a duplicate"; else printf "%s\n" "$key" >> ~/.ssh/authorized_keys && echo "key added"; fi' \
+                < "${KEY}.pub"; then
+                warning "Could not install the public key on ${REMOTE_HOST}. Aborting."
+                exit 1
+            fi
         fi
         if ! ssh -i "$KEY" -o BatchMode=yes "${REMOTE_USER}@${REMOTE_HOST}" 'echo ok' >/dev/null 2>&1; then
             warning "Key auth failed. Aborting."; exit 1
@@ -406,6 +426,26 @@ elif command -v lsof >/dev/null 2>&1; then
     fi
 fi
 
+# linux_port_held_by_ssh <port> [bind-address] - is Relay's own ssh listening?
+# Same question the macOS lsof and Windows netstat checks ask, in the tool a
+# plain Linux box actually has. Falls back to a bare connect probe where neither
+# ss nor lsof exists, which cannot prove ownership - the caller reports that
+# distinction rather than claiming a verified tunnel.
+linux_port_held_by_ssh() {
+    local port="$1" addr="${2:-}"
+    local filter=":${port}\$"
+    [ -n "$addr" ] && filter="^${addr}:${port}\$"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltnpH 2>/dev/null | awk -v p="$filter" '$4 ~ p' | grep -q '(("ssh"'
+    elif command -v lsof >/dev/null 2>&1; then
+        local lsof_filter="-iTCP:${port}"
+        [ -n "$addr" ] && lsof_filter="-iTCP@${addr}:${port}"
+        lsof -nP "$lsof_filter" -sTCP:LISTEN -Fc 2>/dev/null | grep -qx 'cssh'
+    else
+        ( exec 3<>"/dev/tcp/${addr:-127.0.0.1}/$port" ) 2>/dev/null
+    fi
+}
+
 # --- Port conflict check for the web-interface forwards (warn-only, never auto-killed) ---
 for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
     if [ "$PLATFORM" = "windows" ]; then
@@ -563,7 +603,16 @@ EOF
         UPDATER_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adb-tunnel-updater.sh"
         if [ -f "$UPDATER_SRC" ] && bash -n "$UPDATER_SRC"; then
             UPDATER_DEST="${CONFIG_ROOT}/../adb-tunnel-updater.sh"
-            install -m 755 "$UPDATER_SRC" "$UPDATER_DEST" 2>/dev/null || cp "$UPDATER_SRC" "$UPDATER_DEST" && chmod 755 "$UPDATER_DEST"
+            # Replace by rename, never in place: the nightly updater may be
+            # executing this very file while install.sh --auto rewrites it.
+            if cp "$UPDATER_SRC" "${UPDATER_DEST}.new.$$" 2>/dev/null \
+                && chmod 755 "${UPDATER_DEST}.new.$$" 2>/dev/null \
+                && mv -f "${UPDATER_DEST}.new.$$" "$UPDATER_DEST"; then
+                :
+            else
+                rm -f "${UPDATER_DEST}.new.$$" 2>/dev/null || true
+                echo "Auto-update could not be installed to ${UPDATER_DEST}."
+            fi
             UPDATER_PLIST="$HOME/Library/LaunchAgents/com.adbtunnel.updater.plist"
             cat > "$UPDATER_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -753,11 +802,34 @@ EOF
 
     PS1="${INSTALL_DIR}/install-task-${SAFE_HOST}.ps1"
     cat > "$PS1" <<'PSEOF'
-param([string]$TaskName, [string]$Launcher, [string]$RemoteHost)
+param([string]$TaskName, [string]$Launcher, [string]$Ports)
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-Get-CimInstance Win32_Process -Filter "Name='ssh.exe' or Name='sshpass.exe'" |
-    Where-Object { $_.CommandLine -and $_.CommandLine.Contains($RemoteHost) } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+# Stop only an ssh that is holding one of Relay's own forwarded ports.
+#
+# The previous version of this script matched on the bridge host appearing
+# anywhere in the command line, which also matched every interactive
+# `ssh user@bridge` the operator had open in another terminal - it killed their
+# own shell sessions during an ordinary reinstall. Holding a Relay forward port
+# is the actual test: those four ports are Relay's by definition here, and an
+# ssh that owns one of them is this laptop's previous tunnel (or a rogue local
+# adb, which the guard handles). A non-ssh listener is somebody's dev server:
+# reported, never touched.
+$portList = @($Ports -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ })
+foreach ($port in $portList) {
+    $owners = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue |
+               Select-Object -ExpandProperty OwningProcess -Unique)
+    foreach ($procId in $owners) {
+        $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+        if (-not $proc) { continue }
+        if ($proc.ProcessName -ne 'ssh') {
+            Write-Output ("port {0} is held by {1} (pid {2}) - leaving it alone." -f $port, $proc.ProcessName, $procId)
+            continue
+        }
+        Write-Output ("stopping stale Relay tunnel ssh (pid {0}) still holding port {1}." -f $procId, $port)
+        Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+    }
+}
+Start-Sleep -Milliseconds 500
 try {
     $Action   = New-ScheduledTaskAction -Execute "$env:WINDIR\System32\wscript.exe" -Argument "`"$Launcher`""
     $Trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
@@ -774,7 +846,7 @@ PSEOF
     STARTUP_DIR="$(cygpath -u "$APPDATA")/Microsoft/Windows/Start Menu/Programs/Startup"
     STARTUP_VBS="${STARTUP_DIR}/adb-tunnel-${SAFE_HOST}.vbs"
     STARTUP_BAT="${STARTUP_DIR}/adb-tunnel-${SAFE_HOST}.bat"
-    if powershell -NoProfile -ExecutionPolicy Bypass -File "$PS1_WIN" -TaskName "$TASK_NAME" -Launcher "$WIN_WRAPPER_VBS" -RemoteHost "$REMOTE_HOST"; then
+    if powershell -NoProfile -ExecutionPolicy Bypass -File "$PS1_WIN" -TaskName "$TASK_NAME" -Launcher "$WIN_WRAPPER_VBS" -Ports "${LOCAL_PORT},${WEB_LOCAL_PORT},${PANELS_LOCAL_PORT},${PANELS_WS_LOCAL_PORT}"; then
         important "Tunnel task '${TASK_NAME}' registered via Scheduled Task. Log: ${LOG_FILE_WIN}"
         rm -f "$STARTUP_BAT" "$STARTUP_VBS"  # in case an earlier run fell back to Startup
     else
@@ -801,7 +873,16 @@ PSEOF
         UPDATER_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adb-tunnel-updater.sh"
         if [ -f "$UPDATER_SRC" ] && bash -n "$UPDATER_SRC"; then
             UPDATER_DEST="${INSTALL_DIR}/adb-tunnel-updater.sh"
-            cp "$UPDATER_SRC" "$UPDATER_DEST"
+            # Rename into place, same reason as the macOS path above: a running
+            # updater must never have its own file rewritten underneath it.
+            if cp "$UPDATER_SRC" "${UPDATER_DEST}.new.$$" 2>/dev/null \
+                && chmod 755 "${UPDATER_DEST}.new.$$" 2>/dev/null \
+                && mv -f "${UPDATER_DEST}.new.$$" "$UPDATER_DEST"; then
+                :
+            else
+                rm -f "${UPDATER_DEST}.new.$$" 2>/dev/null || true
+                echo "Auto-update could not be installed to ${UPDATER_DEST}."
+            fi
             BASH_BIN_WIN="$(cygpath -w "$(command -v bash)")"
             UPDATER_DEST_WIN="$(cygpath -w "$UPDATER_DEST")"
             UPD_PS1="${INSTALL_DIR}/install-updater-task.ps1"
@@ -811,7 +892,11 @@ Unregister-ScheduledTask -TaskName "ADBTunnelUpdater" -Confirm:$false -ErrorActi
 try {
     $Action   = New-ScheduledTaskAction -Execute $BashBin -Argument "`"$ScriptPath`""
     $Trigger  = New-ScheduledTaskTrigger -Daily -At 3am
-    $Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    # -StartWhenAvailable: a workshop laptop is almost always powered off at 3am,
+    # and without this the daily trigger is simply missed - those machines then
+    # never receive an update, silently, for as long as they stay off overnight.
+    # It runs the check as soon as the machine is next available instead.
+    $Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
     Register-ScheduledTask -TaskName "ADBTunnelUpdater" -Action $Action -Trigger $Trigger -Settings $Settings -Force -ErrorAction Stop | Out-Null
     exit 0
 } catch {
@@ -830,15 +915,65 @@ PSEOF
     ;;
 
 linux)
-    echo "No auto-start mechanism set up for plain Linux laptops - use a"
-    echo "systemd --user unit or cron @reboot to persist this command:"
-    if [ "$AUTH_CHOICE" = "1" ]; then
-        echo "  ssh -i $KEY -N -o BatchMode=yes -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST}"
-    else
-        echo "  sshpass -f $PASSFILE ssh -N -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST}"
-    fi
-    echo "Auto-update is not implemented for this path - it's a manual command, not a managed service."
-    ;;
+        # Plain Linux has no LaunchAgent and no Task Scheduler, so this path used
+        # to print a command and nothing else - no tunnel, no persistence, no
+        # health check - and then still report "Done / adb server should be
+        # reachable at localhost:5037", which was only true if the user had run
+        # the printed command themselves. Start the tunnel now for real, verify
+        # it below like every other platform, and say plainly which parts are
+        # still the user's job.
+        LINUX_LOG="${CONFIG_ROOT}/adb-tunnel-${SAFE_HOST}.log"
+        LINUX_FORWARDS=(
+            -L "127.0.0.1:${LOCAL_PORT}:localhost:${REMOTE_PORT}"
+            -L "${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT}"
+            -L "${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT}"
+            -L "${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT}"
+        )
+        LINUX_OPTS=(-N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+        if [ "$AUTH_CHOICE" = "1" ]; then
+            LINUX_SSH=(ssh -i "$KEY" -o BatchMode=yes "${LINUX_OPTS[@]}" "${LINUX_FORWARDS[@]}" "${REMOTE_USER}@${REMOTE_HOST}")
+        else
+            LINUX_SSH=(sshpass -f "$PASSFILE" ssh "${LINUX_OPTS[@]}" "${LINUX_FORWARDS[@]}" "${REMOTE_USER}@${REMOTE_HOST}")
+        fi
+        # Detach properly: setsid so the tunnel is not in this terminal's
+        # process group (a Ctrl-C here would otherwise take the tunnel with it),
+        # nohup as the fallback on boxes without util-linux's setsid.
+        if command -v setsid >/dev/null 2>&1; then
+            setsid "${LINUX_SSH[@]}" >>"$LINUX_LOG" 2>&1 < /dev/null &
+        else
+            nohup "${LINUX_SSH[@]}" >>"$LINUX_LOG" 2>&1 < /dev/null &
+        fi
+        disown 2>/dev/null || true
+        important "Tunnel started (pid $!). Log: ${LINUX_LOG}"
+
+        # A ready-to-enable systemd --user unit, written but NOT enabled: which
+        # of these applies (linger, which key, key permissions) differs per
+        # distro, and silently enabling a unit that cannot log in unattended is
+        # worse than printing the two commands.
+        LINUX_UNIT="${CONFIG_ROOT}/adb-tunnel-${SAFE_HOST}.service"
+        {
+            echo "[Unit]"
+            echo "Description=Relay ADB tunnel to ${REMOTE_HOST}"
+            echo "After=network-online.target"
+            echo ""
+            echo "[Service]"
+            echo "Type=simple"
+            printf 'ExecStart='
+            printf '%q ' "${LINUX_SSH[@]}"
+            echo ""
+            echo "Restart=always"
+            echo "RestartSec=5"
+            echo ""
+            echo "[Install]"
+            echo "WantedBy=default.target"
+        } > "$LINUX_UNIT"
+        important "No auto-start on plain Linux yet. To persist this tunnel:"
+        important "  loginctl enable-linger \$USER      # so it runs without an open session"
+        important "  systemctl --user enable --now adb-tunnel-$(basename "$LINUX_UNIT" .service)"
+        echo "  (unit written to ${LINUX_UNIT}, adapted to your paths if needed)"
+        echo "Auto-update is not installed on this platform - 'git pull' and re-run"
+        echo "install.sh to pick up fixes."
+        ;;
 esac
 
 # --- Verify the tunnel actually came up before declaring success ---
@@ -900,8 +1035,25 @@ elif [ "$PLATFORM" = "windows" ]; then
         warning "port ${LOCAL_PORT} is held by ${LOCAL_LISTENER:-an unknown process}, not the tunnel's ssh.exe - adb clients will not reach the bridge."
         HEALTH_OK=0
     fi
+elif [ "$PLATFORM" = "linux" ]; then
+    # Same standard as macOS: the adb forward is declared on 127.0.0.1 only, so
+    # check that address specifically - an adb server that auto-spawned on the
+    # machine in the gap before our ssh started would otherwise pass.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        linux_port_held_by_ssh "$LOCAL_PORT" "127.0.0.1" && break
+        sleep 1
+    done
+    if ! linux_port_held_by_ssh "$LOCAL_PORT" "127.0.0.1"; then
+        warning "127.0.0.1:${LOCAL_PORT} is not held by the tunnel's ssh - adb clients on this machine will not reach the bridge."
+        HEALTH_OK=0
+    fi
+    for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
+        if ! linux_port_held_by_ssh "$CHECK_PORT"; then
+            warning "port $CHECK_PORT is not held by the tunnel's ssh - that web tool will not reach the Control Hub."
+            HEALTH_OK=0
+        fi
+    done
 fi
-# (linux path never starts a live process itself - nothing to health-check.)
 
 if [ "$AUTO" = "1" ]; then
     if [ "$HEALTH_OK" = "0" ]; then
@@ -925,6 +1077,7 @@ else
         case "$PLATFORM" in
             mac) echo "Check: /tmp/adbtunnel-${SAFE_HOST}.log and /tmp/adbtunnel-${SAFE_HOST}.err" ;;
             windows) echo "Check: ${LOG_FILE_WIN}" ;;
+            linux) echo "Check: ${LINUX_LOG}" ;;
         esac
         exit 1
     fi
