@@ -91,6 +91,10 @@ if [ "$AUTO" = "1" ]; then
     # this forward existed, same pattern as WEB_LOCAL_PORT above.
     PANELS_WS_LOCAL_PORT="${PANELS_WS_LOCAL_PORT:-8002}"
     PANELS_WS_REMOTE_PORT="${PANELS_WS_REMOTE_PORT:-8002}"
+    # PedroPathing autotuner. Defaulted for configs saved before this forward
+    # existed, same pattern as the ports above.
+    PEDRO_TUNER_LOCAL_PORT="${PEDRO_TUNER_LOCAL_PORT:-10158}"
+    PEDRO_TUNER_REMOTE_PORT="${PEDRO_TUNER_REMOTE_PORT:-10158}"
     section "=== ADB Tunnel auto-update (${REMOTE_HOST}), replaying saved config ==="
     if [ "$AUTH_CHOICE" != "1" ]; then
         warning "Password-auth config found under --auto - this should never happen (password configs aren't supposed to get an updater registered)."
@@ -135,6 +139,9 @@ else
     PANELS_REMOTE_PORT="8001"
     PANELS_WS_LOCAL_PORT="8002"
     PANELS_WS_REMOTE_PORT="8002"
+    # PedroPathing autotuner - same port on both sides, hardcoded like the rest.
+    PEDRO_TUNER_LOCAL_PORT="10158"
+    PEDRO_TUNER_REMOTE_PORT="10158"
 
     echo ""
     important "Auth method:"
@@ -207,6 +214,8 @@ PANELS_LOCAL_PORT="${PANELS_LOCAL_PORT}"
 PANELS_REMOTE_PORT="${PANELS_REMOTE_PORT}"
 PANELS_WS_LOCAL_PORT="${PANELS_WS_LOCAL_PORT}"
 PANELS_WS_REMOTE_PORT="${PANELS_WS_REMOTE_PORT}"
+PEDRO_TUNER_LOCAL_PORT="${PEDRO_TUNER_LOCAL_PORT}"
+PEDRO_TUNER_REMOTE_PORT="${PEDRO_TUNER_REMOTE_PORT}"
 AUTH_CHOICE="${AUTH_CHOICE}"
 KEY="${KEY}"
 PASSFILE="${PASSFILE}"
@@ -287,7 +296,7 @@ teardown_previous_install() {
             # lsof here is macOS-only; the Windows equivalent is the PowerShell
             # block further down, which stops ssh.exe for this host before it
             # re-registers.
-            for check_port in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
+            for check_port in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT" "$PEDRO_TUNER_LOCAL_PORT"; do
                 for pid in $(lsof -nP -tiTCP:"$check_port" -sTCP:LISTEN 2>/dev/null | sort -u); do
                     name="$(basename "$(ps -p "$pid" -o comm= 2>/dev/null)")"
                     if [ "$name" != "ssh" ]; then
@@ -447,7 +456,7 @@ linux_port_held_by_ssh() {
 }
 
 # --- Port conflict check for the web-interface forwards (warn-only, never auto-killed) ---
-for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
+for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT" "$PEDRO_TUNER_LOCAL_PORT"; do
     if [ "$PLATFORM" = "windows" ]; then
         if command -v netstat >/dev/null 2>&1 && netstat -ano 2>/dev/null | grep -q ":${CHECK_PORT} .*LISTENING"; then
             important "NOTE: something is on local port $CHECK_PORT already - expected if the old tunnel is still up; it'll be replaced below. If this is the web-interface port and it's a leftover dev server (Tomcat/webpack/etc. commonly squat 8080), pick a different WEB_LOCAL_PORT instead of assuming it's safe to kill."
@@ -529,6 +538,8 @@ GUARD_EOF
         <string>${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT}</string>
         <string>-L</string>
         <string>${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT}</string>
+        <string>-L</string>
+        <string>${PEDRO_TUNER_LOCAL_PORT}:${ROBOT_IP}:${PEDRO_TUNER_REMOTE_PORT}</string>
         <string>${REMOTE_USER}@${REMOTE_HOST}</string>"
     else
         SSHPASS_BIN="$(command -v sshpass)"
@@ -554,6 +565,8 @@ GUARD_EOF
         <string>${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT}</string>
         <string>-L</string>
         <string>${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT}</string>
+        <string>-L</string>
+        <string>${PEDRO_TUNER_LOCAL_PORT}:${ROBOT_IP}:${PEDRO_TUNER_REMOTE_PORT}</string>
         <string>${REMOTE_USER}@${REMOTE_HOST}</string>"
     fi
 
@@ -768,7 +781,7 @@ PRUNE_EOF
 echo [%date% %time%] starting tunnel to ${REMOTE_HOST} >> "${LOG_FILE_WIN}"
 ${PRUNE_LINE}
 ${GUARD_LINE}
-"${SSH_BIN_WIN}" -i "${WIN_KEY}" -N -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
+"${SSH_BIN_WIN}" -i "${WIN_KEY}" -N -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} -L ${PEDRO_TUNER_LOCAL_PORT}:${ROBOT_IP}:${PEDRO_TUNER_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
 echo [%date% %time%] tunnel exited, restarting in 5s >> "${LOG_FILE_WIN}"
 timeout /t 5 /nobreak >nul
 goto loop
@@ -782,7 +795,7 @@ EOF
 echo [%date% %time%] starting tunnel to ${REMOTE_HOST} >> "${LOG_FILE_WIN}"
 ${PRUNE_LINE}
 ${GUARD_LINE}
-"${SSHPASS_BIN_WIN}" -f "${WIN_PASSFILE}" "${SSH_BIN_WIN}" -N -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
+"${SSHPASS_BIN_WIN}" -f "${WIN_PASSFILE}" "${SSH_BIN_WIN}" -N -o StrictHostKeyChecking=accept-new -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} -L ${PEDRO_TUNER_LOCAL_PORT}:${ROBOT_IP}:${PEDRO_TUNER_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST} >> "${LOG_FILE_WIN}" 2>&1
 echo [%date% %time%] tunnel exited, restarting in 5s >> "${LOG_FILE_WIN}"
 timeout /t 5 /nobreak >nul
 goto loop
@@ -846,7 +859,7 @@ PSEOF
     STARTUP_DIR="$(cygpath -u "$APPDATA")/Microsoft/Windows/Start Menu/Programs/Startup"
     STARTUP_VBS="${STARTUP_DIR}/adb-tunnel-${SAFE_HOST}.vbs"
     STARTUP_BAT="${STARTUP_DIR}/adb-tunnel-${SAFE_HOST}.bat"
-    if powershell -NoProfile -ExecutionPolicy Bypass -File "$PS1_WIN" -TaskName "$TASK_NAME" -Launcher "$WIN_WRAPPER_VBS" -Ports "${LOCAL_PORT},${WEB_LOCAL_PORT},${PANELS_LOCAL_PORT},${PANELS_WS_LOCAL_PORT}"; then
+    if powershell -NoProfile -ExecutionPolicy Bypass -File "$PS1_WIN" -TaskName "$TASK_NAME" -Launcher "$WIN_WRAPPER_VBS" -Ports "${LOCAL_PORT},${WEB_LOCAL_PORT},${PANELS_LOCAL_PORT},${PANELS_WS_LOCAL_PORT},${PEDRO_TUNER_LOCAL_PORT}"; then
         important "Tunnel task '${TASK_NAME}' registered via Scheduled Task. Log: ${LOG_FILE_WIN}"
         rm -f "$STARTUP_BAT" "$STARTUP_VBS"  # in case an earlier run fell back to Startup
     else
@@ -928,6 +941,7 @@ linux)
             -L "${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT}"
             -L "${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT}"
             -L "${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT}"
+            -L "${PEDRO_TUNER_LOCAL_PORT}:${ROBOT_IP}:${PEDRO_TUNER_REMOTE_PORT}"
         )
         LINUX_OPTS=(-N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
         if [ "$AUTH_CHOICE" = "1" ]; then
@@ -1013,7 +1027,7 @@ if [ "$PLATFORM" = "mac" ]; then
     # first. Under --auto a failed health check exits 1, which makes the nightly
     # updater refuse to bump VERSION - so a filter that false-fails on a healthy
     # tunnel would silently stop all updates.
-    for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
+    for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT" "$PEDRO_TUNER_LOCAL_PORT"; do
         if ! lsof -nP -iTCP:"$CHECK_PORT" -sTCP:LISTEN -Fc 2>/dev/null | grep -qx 'cssh'; then
             warning "port $CHECK_PORT is not held by the tunnel's ssh - that web tool will not reach the Control Hub."
             HEALTH_OK=0
@@ -1021,7 +1035,7 @@ if [ "$PLATFORM" = "mac" ]; then
     done
 elif [ "$PLATFORM" = "windows" ]; then
     sleep 3
-    for CHECK_PORT in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
+    for CHECK_PORT in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT" "$PEDRO_TUNER_LOCAL_PORT"; do
         if ! command -v netstat >/dev/null 2>&1 || ! netstat -ano 2>/dev/null | grep -q ":${CHECK_PORT} .*LISTENING"; then
             warning "port $CHECK_PORT is not listening - tunnel did not come up cleanly."
             HEALTH_OK=0
@@ -1047,7 +1061,7 @@ elif [ "$PLATFORM" = "linux" ]; then
         warning "127.0.0.1:${LOCAL_PORT} is not held by the tunnel's ssh - adb clients on this machine will not reach the bridge."
         HEALTH_OK=0
     fi
-    for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT"; do
+    for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT" "$PEDRO_TUNER_LOCAL_PORT"; do
         if ! linux_port_held_by_ssh "$CHECK_PORT"; then
             warning "port $CHECK_PORT is not held by the tunnel's ssh - that web tool will not reach the Control Hub."
             HEALTH_OK=0
@@ -1067,11 +1081,12 @@ else
         echo "adb server should be reachable at localhost:${LOCAL_PORT}."
         echo "Control Hub web interface (Program & Manage) should be reachable at http://localhost:${WEB_LOCAL_PORT}"
         echo "Panels dashboard (if used) should be reachable at http://localhost:${PANELS_LOCAL_PORT}"
+        echo "PedroPathing autotuner (if used) should be reachable at localhost:${PEDRO_TUNER_LOCAL_PORT}"
         echo "Quit and reopen Android Studio, confirm the device shows up before deploying."
     else
         warning "Setup ran, but the tunnel is NOT confirmed healthy"
         echo "One or more forwarded ports never came up. Likely cause: something else is"
-        echo "already bound to one of ${LOCAL_PORT}/${WEB_LOCAL_PORT}/${PANELS_LOCAL_PORT}/${PANELS_WS_LOCAL_PORT} -"
+        echo "already bound to one of ${LOCAL_PORT}/${WEB_LOCAL_PORT}/${PANELS_LOCAL_PORT}/${PANELS_WS_LOCAL_PORT}/${PEDRO_TUNER_LOCAL_PORT} -"
         echo "ExitOnForwardFailure kills the WHOLE tunnel if even one forward fails, so the"
         echo "adb forward can be down even though only the web-interface port collided."
         case "$PLATFORM" in
