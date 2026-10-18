@@ -174,6 +174,14 @@ stays as it was, and laptops need no changes. The old Wi-Fi profile is kept
 with auto-connect turned off, so you can switch back by running the script
 again.
 
+Every hub the bridge has a Wi-Fi profile for is a fallback. If the configured
+hub is off, the bridge joins another known hub that is in range, and laptops
+keep working because every Control Hub uses the same address. The log says
+which hub it is on (`Now on configured hub ...` or `Now on fallback hub ...`).
+The bridge stays on a fallback hub until that hub goes off, so it never cuts
+off a robot that is in use. To stop using a hub as a fallback, delete its
+profile with `sudo nmcli connection delete "<hub name>"`.
+
 ## Updates
 
 Relay checks for updates overnight, around 3 AM. An update is applied only
