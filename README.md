@@ -175,6 +175,7 @@ After the laptop tunnel is running, open:
 | Control Hub Program & Manage | `http://localhost:8091` |
 | FTC Dashboard | `http://localhost:8091/dash` |
 | Panels | `http://localhost:8001` |
+| Pedro Pathing AutoTune | `http://localhost:10158` |
 
 Program & Manage and FTC Dashboard are the same web server on the hub
 (port 8080), so they share one forwarded address - if you're using FTC
