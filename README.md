@@ -181,6 +181,11 @@ Program & Manage and FTC Dashboard are the same web server on the hub
 (port 8080), so they share one forwarded address - if you're using FTC
 Dashboard, that's the URL to open.
 
+Pedro Pathing AutoTune only allows one client at a time. If it reports that a
+tuning client is already connected, close any other AutoTune tab or device
+(including one on the robot's own Wi-Fi), or stop and re-init the AutoTune
+OpMode on the Driver Station, then reload the page.
+
 ## Updates
 
 Relay checks for updates overnight, around 3 AM. An update is applied only
