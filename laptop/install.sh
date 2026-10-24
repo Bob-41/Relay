@@ -473,6 +473,15 @@ KEEP_FILE="${STATE_DIR}/guard-${PORT}.keep"
 
 log() { printf '%s adb-tunnel-guard: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1" >&2; }
 
+# launchd appends to the tunnel's logs on every respawn and /tmp lasts until
+# reboot, so keep the newest 2.5 MB of each once it passes 5 MB. Rewritten in
+# place, not replaced, so the file launchd has open stays the one on disk.
+lsof -a -p $$ -d 1,2 -Fn 2>/dev/null | sed -n 's/^n//p' | sort -u | while IFS= read -r f; do
+    [ -f "$f" ] && [ "$(stat -f %z "$f" 2>/dev/null || echo 0)" -gt 5242880 ] || continue
+    tail -c 2621440 "$f" > "$f.tmp" && cat "$f.tmp" > "$f"
+    rm -f "$f.tmp"
+done
+
 # wait_and_retry KIND MESSAGE - logged once per change, not every retry; the
 # sleep keeps launchd's respawn from becoming a 10-second loop. install.sh's
 # health check reads KIND back: "in-use" means a working install waiting on

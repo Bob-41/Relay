@@ -247,9 +247,10 @@ authentication, re-run `laptop/install.sh` to update that laptop.
 | Windows updater | `%APPDATA%\\adb-tunnel\\updater.log` |
 
 Logs are capped so they cannot fill the disk. The bridge log rotates weekly at
-5 MB, keeping 4 compressed generations. Laptop logs are trimmed to their newest
-2.5 MB whenever they pass 5 MB - on macOS at install and each time the agent
-restarts, on Windows on every reconnect attempt.
+5 MB, keeping 4 compressed generations. Laptop tunnel logs are trimmed to their
+newest 2.5 MB whenever they pass 5 MB - on macOS at install and each time the
+tunnel restarts, on Windows on every reconnect attempt. The updater logs grow
+by a few lines a night.
 
 The bridge watchdog logs a line roughly every 5 seconds while it is working and
 says so explicitly when it cannot make progress. If the Control Hub's Wi-Fi never
