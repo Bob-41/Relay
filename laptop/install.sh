@@ -1061,6 +1061,13 @@ EOF
     cat > "$PS1" <<'PSEOF'
 param([string]$TaskName, [string]$Launcher, [string]$RemoteHost)
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+# Unregistering leaves a running loop behind, and once its ssh dies its cmd.exe
+# reads the rewritten .bat from where it was and becomes a second loop.
+foreach ($image in 'wscript.exe', 'cmd.exe') {
+    Get-CimInstance Win32_Process -Filter "Name='$image'" |
+        Where-Object { $_.CommandLine -match 'adb-tunnel-[^\\"]+\.(vbs|bat)' } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+}
 Get-CimInstance Win32_Process -Filter "Name='ssh.exe' or Name='sshpass.exe'" |
     Where-Object { $_.CommandLine -and $_.CommandLine.Contains($RemoteHost) } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
