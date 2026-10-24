@@ -232,7 +232,7 @@ teardown_previous_install() {
     # the same ports is always a leftover, never a legitimate second bridge.
     # Match on the artifact pattern, never on SAFE_HOST: SAFE_HOST is derived
     # from REMOTE_HOST, so the same machine named two ways (`raspi` vs
-    # `100.105.201.65`) yields two different names, and a name-scoped teardown
+    # `100.x.y.z`) yields two different names, and a name-scoped teardown
     # silently misses the old one. That is not hypothetical - the README tells
     # Windows users to switch to the Tailscale IP, so hostname -> IP is a
     # documented migration. Worse, the nightly updater globs every *.env, so
