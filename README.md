@@ -206,9 +206,30 @@ authentication, re-run `laptop/install.sh` to update that laptop.
   back:** this was a known bug and the current laptop installer fixes it. A
   sleeping laptop can wake with a local ADB server sitting on port 5037, which
   made the tunnel bind only half the address it should have, so Android Studio
-  talked to a local server that had never seen the robot. Relay now clears that
-  server automatically every time the tunnel (re)starts. If it still happens,
-  check the tunnel log for `adb-tunnel-guard` messages.
+  talked to a local server that had never seen the robot. Relay now clears an
+  idle local server like that whenever the tunnel (re)starts and can reach the
+  bridge. If it still happens, check the tunnel log for `adb-tunnel-guard`
+  messages.
+- **ADB keeps disconnecting on a Mac while the bridge is off, or while the
+  laptop is on a Control Hub's own Wi-Fi or USB:** older laptop installs shut
+  down every local ADB server each time the tunnel retried, which made adb and
+  Android Studio unusable without the bridge. The current macOS installer clears
+  a local ADB server only when ssh can log in to the bridge and bind the
+  tunnel's ports, and that server had no usable device when Relay checked;
+  otherwise it leaves it alone and retries every 15 seconds. A laptop on an
+  older install that can't reach the bridge can't update itself, so pause its
+  tunnel until it can: find its name with `ls ~/Library/LaunchAgents/com.adbtunnel.*`
+  (not the `.updater` one), then run
+  `launchctl bootout gui/$(id -u)/<that name without .plist>`. It comes back at
+  the next login or the next install. Windows laptops still clear a local ADB
+  server on every retry.
+- **The tunnel stays down and the log says a local adb server `has been used
+  for` a device, `didn't answer`, or `refused to shut down`:** a phone, Control
+  Hub or other device was attached through this laptop's own ADB server, so
+  Relay won't take the port from it. Unplug or `adb disconnect` that device,
+  then run `adb kill-server`; the tunnel starts within about 15 seconds. A phone
+  paired for Wireless debugging reconnects to every new ADB server by itself,
+  so turn Wireless debugging off on it.
 - **Panels loads only a blank page:** make sure you are using the current
   laptop installer, which forwards both the Panels web page and its live-data
   connection.
