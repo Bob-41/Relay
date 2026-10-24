@@ -210,19 +210,20 @@ authentication, re-run `laptop/install.sh` to update that laptop.
   idle local server like that whenever the tunnel (re)starts and can reach the
   bridge. If it still happens, check the tunnel log for `adb-tunnel-guard`
   messages.
-- **ADB keeps disconnecting on a Mac while the bridge is off, or while the
-  laptop is on a Control Hub's own Wi-Fi or USB:** older laptop installs shut
-  down every local ADB server each time the tunnel retried, which made adb and
-  Android Studio unusable without the bridge. The current macOS installer clears
-  a local ADB server only when ssh can log in to the bridge and bind the
-  tunnel's ports, and that server had no usable device when Relay checked;
-  otherwise it leaves it alone and retries every 15 seconds. A laptop on an
-  older install that can't reach the bridge can't update itself, so pause its
-  tunnel until it can: find its name with `ls ~/Library/LaunchAgents/com.adbtunnel.*`
+- **ADB keeps disconnecting while the bridge is off, or while the laptop is on
+  a Control Hub's own Wi-Fi or USB:** older laptop installs shut down every
+  local ADB server each time the tunnel retried, which made adb and Android
+  Studio unusable without the bridge. The current installer clears a local ADB
+  server only when ssh can log in to the bridge and bind the tunnel's ports,
+  and that server had no usable device when Relay checked; otherwise it leaves
+  it alone and retries about every 15 seconds. A laptop on an older install
+  that can't reach the bridge can't update itself. On a Mac, pause its tunnel
+  until it can: find its name with `ls ~/Library/LaunchAgents/com.adbtunnel.*`
   (not the `.updater` one), then run
   `launchctl bootout gui/$(id -u)/<that name without .plist>`. It comes back at
-  the next login or the next install. Windows laptops still clear a local ADB
-  server on every retry.
+  the next login or the next install. A Windows laptop on an older install
+  keeps clearing local ADB until it updates: once it can reach the bridge, run
+  `bash laptop/check-for-updates.sh` in Git Bash.
 - **The tunnel stays down and the log says a local adb server `has been used
   for` a device, `didn't answer`, or `refused to shut down`:** a phone, Control
   Hub or other device was attached through this laptop's own ADB server, so
