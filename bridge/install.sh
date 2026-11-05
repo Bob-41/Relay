@@ -123,10 +123,11 @@ primary_lan_ip() {
     printf '%s' "$out"
 }
 
-# Google only ships Linux platform-tools as x86_64. On aarch64 (Raspberry Pi)
-# the distro `adb` package is capped (e.g. Debian 35.0.2) and cannot speak a
-# newer Control Hub / laptop-client protocol. Fix: run Google's binary under
-# box64, leaving apt's /usr/bin/adb untouched as a rollback path.
+# Google only ships Linux platform-tools as x86_64. On an x86_64 host it runs
+# natively; on aarch64 (Raspberry Pi, other ARM boards) the distro `adb` package
+# is capped (e.g. Debian 35.0.2) and cannot speak a newer Control Hub /
+# laptop-client protocol, so the same binary runs under box64. Either way,
+# apt's /usr/bin/adb is left untouched as a rollback path.
 GOOGLE_ADB_DIR="/opt/adb-google"
 GOOGLE_ADB_BIN="${GOOGLE_ADB_DIR}/platform-tools/adb"
 BOX64_LIBS_DIR="/opt/box64-libs"
@@ -146,15 +147,16 @@ version_lt() {
     [ "$(printf '%s\n%s\n' "$a" "$b" | sort -V | head -n1)" = "$a" ] && [ "$a" != "$b" ]
 }
 
-# On pacman distros there is no automatic newer-adb fallback, so at least say so.
+# Last-resort warning when no automatic provisioning path applies to this host.
 warn_if_adb_old() {
     local ver
-    [ "$PKG_MGR" = "pacman" ] || return 0
     ver="$(adb_version_number "$1")"
-    if [ -n "$ver" ] && version_lt "$ver" "$MIN_ADB_VERSION"; then
-        warning "Distro adb ${ver} is older than ${MIN_ADB_VERSION}. If laptops report an adb server version mismatch, update it: sudo pacman -Syu"
-        important "(The automatic box64 + Google platform-tools fallback is apt-only.)"
-    fi
+    [ -n "$ver" ] && version_lt "$ver" "$MIN_ADB_VERSION" || return 0
+    warning "Distro adb ${ver} is older than ${MIN_ADB_VERSION}. If laptops report an adb server version mismatch, update it."
+    case "$PKG_MGR" in
+        pacman) important "Update with: sudo pacman -Syu" ;;
+        *)      important "No automatic fallback is available on $(uname -m); install current platform-tools manually." ;;
+    esac
     return 0
 }
 
@@ -164,6 +166,41 @@ google_adb_wrapper_healthy() {
         && [ -x "$ADB_WRAPPER" ] \
         && grep -q 'box64' "$ADB_WRAPPER" 2>/dev/null \
         && "$ADB_WRAPPER" version >/dev/null 2>&1
+}
+
+# Google's platform-tools zip has an x86_64 Linux binary, so an x86_64 bridge
+# runs it without box64. Keep this separate from the aarch64 path above: the
+# two wrappers differ, and a native wrapper must never be mistaken for a
+# broken box64 one (or vice versa).
+host_runs_google_adb_natively() {
+    case "$(uname -m)" in
+        x86_64|amd64) return 0 ;;
+    esac
+    return 1
+}
+
+native_google_adb_healthy() {
+    host_runs_google_adb_natively \
+        && [ -x "$GOOGLE_ADB_BIN" ] \
+        && [ -x "$ADB_WRAPPER" ] \
+        && ! grep -q 'box64' "$ADB_WRAPPER" 2>/dev/null \
+        && "$ADB_WRAPPER" version >/dev/null 2>&1
+}
+
+# True when an x86_64 host's distro adb is too old and Google's binary can run
+# natively. Without this, Ubuntu 22.04/24.04 and similar LTS images keep a
+# 3x-era adb server that a current laptop client kills and replaces locally,
+# silently breaking the tunnel.
+needs_native_google_adb() {
+    host_runs_google_adb_natively || return 1
+    native_google_adb_healthy && return 1
+
+    local sys_ver
+    sys_ver="$(adb_version_number /usr/bin/adb)"
+    # No readable distro adb: install.sh already tried the package manager, so
+    # provisioning Google's binary is the remaining way to get a server.
+    [ -n "$sys_ver" ] || return 0
+    version_lt "$sys_ver" "$MIN_ADB_VERSION"
 }
 
 # True when this host needs the box64 + Google platform-tools path.
@@ -329,7 +366,9 @@ ensure_box64_amd64_libs() {
 install_google_platform_tools() {
     local tmp zip
     important "Fetching Google platform-tools (x86_64) into ${GOOGLE_ADB_DIR}..."
-    command -v unzip >/dev/null 2>&1 || apt-get install -y unzip
+    if ! command -v unzip >/dev/null 2>&1; then
+        pkg_install unzip || { warning "unzip is required to extract platform-tools. Install it and re-run."; return 1; }
+    fi
     tmp="$(mktemp -d)"
     zip="${tmp}/platform-tools-latest-linux.zip"
     if ! curl -fsSL --retry 3 -o "$zip" "$PLATFORM_TOOLS_URL"; then
@@ -364,40 +403,71 @@ EOF
     chmod 755 "$ADB_WRAPPER"
 }
 
-# Installs or repairs the box64 Google adb path when needed.
+write_adb_native_wrapper() {
+    cat > "$ADB_WRAPPER" <<EOF
+#!/bin/bash
+# Relay: Google platform-tools adb (native x86_64). Rollback: /usr/bin/adb
+exec ${GOOGLE_ADB_BIN} "\$@"
+EOF
+    chmod 755 "$ADB_WRAPPER"
+}
+
+# Installs or repairs a current Google adb when the distro's is too old.
+# Uses box64 on aarch64 and a native wrapper on x86_64.
 # Sets ADB_BIN to the binary adb-forwarder-server.service should ExecStart.
 # Sets ADB_BIN_CHANGED=1 when the server binary/path was (re)provisioned.
 ensure_adb_for_bridge() {
     ADB_BIN="$(command -v adb)"
     ADB_BIN_CHANGED=0
 
-    if ! needs_box64_google_adb; then
-        if google_adb_wrapper_healthy; then
-            ADB_BIN="$ADB_WRAPPER"
-            important "Using existing Google adb under box64: ${ADB_BIN} ($(adb_version_number "$ADB_BIN"))"
-        else
-            important "Using system adb: ${ADB_BIN} ($(adb_version_number "$ADB_BIN"))"
-            warn_if_adb_old "$ADB_BIN"
+    if needs_box64_google_adb; then
+        section "=== ADB version mismatch on aarch64 ==="
+        important "Distro adb $(adb_version_number /usr/bin/adb) is below ${MIN_ADB_VERSION} (or unreadable)."
+        important "Installing Google platform-tools under box64. Leaving /usr/bin/adb alone."
+
+        ensure_box64_installed || return 1
+        ensure_box64_amd64_libs || return 1
+        install_google_platform_tools || return 1
+        write_adb_box64_wrapper || return 1
+
+        if ! google_adb_wrapper_healthy; then
+            warning "Google adb wrapper installed but failed \`adb version\`. Check box64 libs."
+            return 1
         fi
+        ADB_BIN="$ADB_WRAPPER"
+        ADB_BIN_CHANGED=1
+        important "Google adb ready: ${ADB_BIN} ($(adb_version_number "$ADB_BIN"))"
         return 0
     fi
 
-    section "=== ADB version mismatch on aarch64 ==="
-    important "Distro adb $(adb_version_number /usr/bin/adb) is below ${MIN_ADB_VERSION} (or unreadable)."
-    important "Installing Google platform-tools under box64. Leaving /usr/bin/adb alone."
+    if needs_native_google_adb; then
+        section "=== ADB version mismatch on x86_64 ==="
+        important "Distro adb $(adb_version_number /usr/bin/adb) is below ${MIN_ADB_VERSION} (or unreadable)."
+        important "Installing Google platform-tools natively. Leaving /usr/bin/adb alone."
 
-    ensure_box64_installed || return 1
-    ensure_box64_amd64_libs || return 1
-    install_google_platform_tools || return 1
-    write_adb_box64_wrapper || return 1
+        install_google_platform_tools || return 1
+        write_adb_native_wrapper || return 1
 
-    if ! google_adb_wrapper_healthy; then
-        warning "Google adb wrapper installed but failed \`adb version\`. Check box64 libs."
-        return 1
+        if ! native_google_adb_healthy; then
+            warning "Google adb wrapper installed but failed \`adb version\`."
+            return 1
+        fi
+        ADB_BIN="$ADB_WRAPPER"
+        ADB_BIN_CHANGED=1
+        important "Google adb ready: ${ADB_BIN} ($(adb_version_number "$ADB_BIN"))"
+        return 0
     fi
-    ADB_BIN="$ADB_WRAPPER"
-    ADB_BIN_CHANGED=1
-    important "Google adb ready: ${ADB_BIN} ($(adb_version_number "$ADB_BIN"))"
+
+    if google_adb_wrapper_healthy; then
+        ADB_BIN="$ADB_WRAPPER"
+        important "Using existing Google adb under box64: ${ADB_BIN} ($(adb_version_number "$ADB_BIN"))"
+    elif native_google_adb_healthy; then
+        ADB_BIN="$ADB_WRAPPER"
+        important "Using existing native Google adb: ${ADB_BIN} ($(adb_version_number "$ADB_BIN"))"
+    else
+        important "Using system adb: ${ADB_BIN} ($(adb_version_number "$ADB_BIN"))"
+        warn_if_adb_old "$ADB_BIN"
+    fi
 }
 
 AUTO=0
@@ -863,7 +933,29 @@ fi
 bash -n "$WATCHDOG_SRC" || { echo "FATAL: watchdog script fails syntax check, refusing to install."; exit 1; }
 install -m 755 "$WATCHDOG_SRC" "$SCRIPT_PATH"
 
-# Prefer Google+box64 on aarch64 when distro adb is too old for current hubs.
+# Install the Wi-Fi change helper beside the watchdog. It is not part of the
+# forwarding path, so an older checkout without it is not fatal.
+CHANGE_WIFI_SRC="${SCRIPT_DIR}/change-robot-wifi.sh"
+CHANGE_WIFI_PATH="/usr/local/bin/adb-forwarder-change-wifi.sh"
+if [ ! -f "$CHANGE_WIFI_SRC" ] && [ "$AUTO" = "1" ]; then
+    # Bootstrap: an updater written before this file existed does not download
+    # it, and it only runs install.sh once per VERSION. Fetch it here, on the
+    # first update that has this code, so the helper does not wait a whole
+    # release. The updater itself downloads it on every later run.
+    curl -fsSL --max-time 15 -o "$CHANGE_WIFI_SRC" \
+        "https://raw.githubusercontent.com/Bob-41/Relay/main/bridge/change-robot-wifi.sh" \
+        || warning "Could not download change-robot-wifi.sh - the Wi-Fi change helper will not be installed this run."
+fi
+if [ -f "$CHANGE_WIFI_SRC" ]; then
+    if bash -n "$CHANGE_WIFI_SRC"; then
+        install -m 755 "$CHANGE_WIFI_SRC" "$CHANGE_WIFI_PATH"
+    else
+        warning "change-robot-wifi.sh fails syntax check, not installing it."
+    fi
+fi
+
+# Prefer Google platform-tools when the distro adb is too old for current hubs:
+# under box64 on aarch64, natively on x86_64.
 # Failure here is non-fatal on interactive? No - without a working adb the
 # bridge is useless on mismatch. Abort so --auto retries next night.
 ensure_adb_for_bridge || {
@@ -886,7 +978,7 @@ Description=Shared adb server (reachable only over SSH-forwarded localhost)
 [Service]
 Type=simple
 # Absolute path: do not rely on PATH when the unit is started by systemd.
-# When using the box64 wrapper this is /usr/local/bin/adb; apt's
+# When using a Google wrapper this is /usr/local/bin/adb; the distro's
 # /usr/bin/adb remains installed as a manual rollback.
 #
 # Deliberately NOT \`-a\`. An adb server started with -a listens on every
@@ -987,7 +1079,7 @@ if [ "$AUTO" != "1" ]; then
     echo "adb-forwarder-connect.service: $(systemctl is-active adb-forwarder-connect.service || true)"
     echo "adb binary: ${ADB_BIN} ($(adb_version_number "$ADB_BIN"))"
     if [ "$ADB_BIN" = "$ADB_WRAPPER" ]; then
-        echo "apt adb left in place for rollback: /usr/bin/adb ($(adb_version_number /usr/bin/adb))"
+        echo "distro adb left in place for rollback: /usr/bin/adb ($(adb_version_number /usr/bin/adb))"
     fi
     # Print the actual bind address, not just "something is listening". This is
     # the check that proves the shared adb server is loopback-only: a `*:PORT`
@@ -1013,6 +1105,7 @@ if [ "$AUTO" != "1" ]; then
     echo "(plain LAN IP for reference: ${LAN_IP:-unknown})"
     echo ""
     echo "Logs: ${LOG_FILE}  |  journalctl -u adb-forwarder-connect.service"
+    echo "Change the robot Wi-Fi later: sudo adb-forwarder-change-wifi.sh"
     echo "Auto-update: checks nightly ~03:00, applies only when VERSION in the repo has"
     echo "increased, syntax-checks first, then rolls itself back if the bridge is not"
     echo "healthy afterwards. Report-only mode: echo manual > /etc/adb-forwarder/update-policy"

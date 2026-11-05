@@ -17,7 +17,7 @@ to the shared server.
 Android Studio on each laptop
             │ secure SSH tunnel
             ▼
-      Relay bridge (Raspberry Pi)
+      Relay bridge (e.g. Raspberry Pi)
             │ Control Hub Wi-Fi
             ▼
        REV Control Hub
@@ -47,9 +47,10 @@ and the bridge are on the same network.
 You need:
 
 - A Linux bridge with `systemd`, NetworkManager, and an SSH server. A
-  Raspberry Pi is a common choice. Debian-family (`apt`) and Arch-family
-  (`pacman`: Arch, CachyOS, EndeavourOS, Manjaro, Arch Linux ARM) distros are
-  supported. The installer installs `iw` and `adb` for you if they are missing.
+  Raspberry Pi or a small x86_64 mini PC both work. Debian-family (`apt`) and
+  Arch-family (`pacman`: Arch, CachyOS, EndeavourOS, Manjaro, Arch Linux ARM)
+  distros are supported. The installer installs `iw` and `adb` for you if they
+  are missing.
 - The Control Hub's Wi-Fi name and password.
 - One network connection for the bridge besides the robot Wi-Fi (for example,
   home Wi-Fi or Ethernet). With Tailscale, it needs internet access.
@@ -86,7 +87,7 @@ At the end it prints the three values every laptop needs:
 
 ```text
 On laptops, point setup at:
-  host: 100.x.y.z   user: pi   port: 5037
+  host: 100.x.y.z   user: your-bridge-user   port: 5037
 ```
 
 Enter those same three values on each laptop.
@@ -181,10 +182,29 @@ Program & Manage and FTC Dashboard are the same web server on the hub
 (port 8080), so they share one forwarded address - if you're using FTC
 Dashboard, that's the URL to open.
 
+FTC Dashboard's live data (op modes, telemetry, configuration) uses a second
+connection on port 8000, which Relay also forwards. Keep local port 8000 free:
+if another program is using it, the whole tunnel fails to start.
+
 Pedro Pathing AutoTune only allows one client at a time. If it reports that a
 tuning client is already connected, close any other AutoTune tab or device
 (including one on the robot's own Wi-Fi), or stop and re-init the AutoTune
 OpMode on the Driver Station, then reload the page.
+
+## Change the robot Wi-Fi
+
+If you switch Control Hubs or change the hub's Wi-Fi name or password, you do
+not need to re-run the full installer. On the bridge, run:
+
+```bash
+sudo adb-forwarder-change-wifi.sh
+```
+
+It asks only for the new Wi-Fi name and password. Press Enter at the name
+prompt to keep the current name and change only the password. Everything else -
+user, Wi-Fi adapter, adb port, reach address, services, updater - stays as it
+was, and laptops need no changes. The old Wi-Fi profile is kept with
+auto-connect turned off, so you can switch back by running the script again.
 
 ## Updates
 
@@ -313,15 +333,18 @@ Read this before you rely on Relay in a workshop.
   prints.
 - **A laptop's `adb` client version must be able to talk to the bridge's adb
   server.** Android Studio bundles its own `adb`; if a laptop reports a version
-  mismatch after an update, update that laptop's SDK platform-tools.
+  mismatch after an update, update that laptop's SDK platform-tools. Relay
+  expects Platform-Tools **36.0.0 or newer** and the laptop installer warns when
+  the `adb` on `PATH` is older.
 - Relay does not lock deployments. Multiple laptops can be connected, but teams
   should communicate before deploying at the same time.
 - Updates never change saved Wi-Fi credentials or site-specific network
   settings.
-- On aarch64 Debian-family bridges (e.g. Raspberry Pi OS), if the distro `adb` is older than
-  36.0.0, `bridge/install.sh` installs Google's x86_64 platform-tools under
-  `box64` (`/opt/adb-google`, libs in `/opt/box64-libs`, wrapper at
+- If the distro `adb` is older than 36.0.0, `bridge/install.sh` installs
+  Google's platform-tools (`/opt/adb-google`, wrapper at
   `/usr/local/bin/adb`) and points `adb-forwarder-server.service` at that
-  wrapper. Apt's `/usr/bin/adb` is left alone as a rollback path. The temporary
-  `amd64` package architecture this needs is removed again before the installer
-  finishes.
+  wrapper. On aarch64 (e.g. Raspberry Pi) it runs them under `box64` with libs
+  in `/opt/box64-libs`; on x86_64 it runs them natively. The distro's
+  `/usr/bin/adb` is left alone as a rollback path. The temporary `amd64`
+  package architecture the aarch64 path needs is removed again before the
+  installer finishes.

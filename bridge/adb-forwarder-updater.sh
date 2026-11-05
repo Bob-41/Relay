@@ -30,6 +30,7 @@ ROLLBACK_ROOT="/var/lib/adb-forwarder/rollback"
 # apply so a bad release can be put back the way it was.
 MANAGED_PATHS=(
     /usr/local/bin/adb-forwarder-connect.sh
+    /usr/local/bin/adb-forwarder-change-wifi.sh
     /usr/local/bin/adb-forwarder-updater.sh
     /etc/systemd/system/adb-forwarder-server.service
     /etc/systemd/system/adb-forwarder-connect.service
@@ -162,11 +163,14 @@ curl -fsSL --max-time 15 -o "${TMP_DIR}/install.sh" "${REPO_RAW}/bridge/install.
 curl -fsSL --max-time 15 -o "${TMP_DIR}/adb-forwarder-connect.sh" "${REPO_RAW}/bridge/adb-forwarder-connect.sh" || {
     log "ERROR: failed to download adb-forwarder-connect.sh. Aborting update."; exit 1;
 }
+curl -fsSL --max-time 15 -o "${TMP_DIR}/change-robot-wifi.sh" "${REPO_RAW}/bridge/change-robot-wifi.sh" || {
+    log "ERROR: failed to download change-robot-wifi.sh. Aborting update."; exit 1;
+}
 curl -fsSL --max-time 15 -o "${TMP_DIR}/adb-forwarder-updater.sh" "${REPO_RAW}/bridge/adb-forwarder-updater.sh" || {
     log "ERROR: failed to download adb-forwarder-updater.sh. Aborting update."; exit 1;
 }
 
-for f in install.sh adb-forwarder-connect.sh adb-forwarder-updater.sh; do
+for f in install.sh adb-forwarder-connect.sh change-robot-wifi.sh adb-forwarder-updater.sh; do
     if ! bash -n "${TMP_DIR}/${f}"; then
         log "ERROR: ${f} fails syntax check. NOT applying this update. Current install left untouched."
         exit 1
