@@ -795,7 +795,7 @@ else
     LOG_FILE="/var/log/adb-forwarder.log"
  
     echo "Configuring NetworkManager profile for $TARGET_SSID..."
-    if nmcli -t -f NAME connection show | grep -Fxq "$TARGET_SSID"; then
+    if nmcli -t -f NAME connection show | grep -Fxq -- "$TARGET_SSID"; then
         echo "Existing profile found, updating."
     else
         nmcli connection add type wifi con-name "$TARGET_SSID" ifname "$WIFI_IFACE" ssid "$TARGET_SSID"
@@ -874,7 +874,7 @@ chmod 640 "$CONFIG_FILE"
 # difference between a bridge that keeps Tailscale and one that goes dark the
 # moment the Control Hub is powered on, and an unattended --auto run is exactly
 # when nobody is watching to notice. Idempotent, and touches no credential.
-if nmcli -t -f NAME connection show 2>/dev/null | grep -Fxq "$TARGET_SSID"; then
+if nmcli -t -f NAME connection show 2>/dev/null | grep -Fxq -- "$TARGET_SSID"; then
     NEVER_DEFAULT_WAS="$(nmcli -g ipv4.never-default connection show "$TARGET_SSID" 2>/dev/null | head -n1)"
     if [ "$NEVER_DEFAULT_WAS" != "yes" ]; then
         if nmcli connection modify "$TARGET_SSID" ipv4.never-default yes ipv6.never-default yes; then
