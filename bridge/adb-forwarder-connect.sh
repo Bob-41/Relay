@@ -74,10 +74,20 @@ wait_for_adb_server() {
     log "adb-server.service is up."
 }
 
+# NM only refreshes its AP list for an already-associated radio rarely, so a plain
+# `nmcli dev wifi list` can keep reporting a stale list for minutes while the hub is
+# sitting right there. Ask for a fresh scan first. The rescan call can be refused
+# when one just ran - harmless, the list below still reads the latest results.
+ssid_visible() {
+    nmcli dev wifi rescan ifname "$WIFI_IFACE" >/dev/null 2>&1 || true
+    sleep 2
+    nmcli -f SSID dev wifi list ifname "$WIFI_IFACE" --rescan no 2>/dev/null | grep -qF "$TARGET_SSID"
+}
+
 wait_for_ssid() {
     log "Scanning for $TARGET_SSID on ${WIFI_IFACE}..."
     local waited=0 relog=0
-    while ! nmcli -f SSID dev wifi list ifname "$WIFI_IFACE" 2>/dev/null | grep -qF "$TARGET_SSID"; do
+    while ! ssid_visible; do
         sleep "$CHECK_INTERVAL"
         waited=$((waited + CHECK_INTERVAL))
         relog=$((relog + CHECK_INTERVAL))
@@ -102,8 +112,8 @@ wait_for_ssid() {
             if ! iface_is_managed; then
                 log "ERROR: root cause is that ${WIFI_IFACE} is unmanaged by NetworkManager."
             else
-                log "ERROR: the interface is managed, so the Control Hub's Wi-Fi is genuinely not broadcasting."
-                log "ERROR: check the Control Hub is powered on and not joined to another laptop."
+                log "ERROR: not seen in any fresh scan on this radio. The Control Hub may be off or out of range,"
+                log "ERROR: or on a band this radio cannot see (the hub has moved between 2.4 and 5 GHz before)."
             fi
             log "ERROR: retrying from scratch."
             return 1
