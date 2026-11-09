@@ -52,12 +52,20 @@ FAILED=0
 for cfg in "${CONFIG_ROOT}"/*.env; do
     [ -e "$cfg" ] || continue
     log "Updating tunnel config: $cfg"
-    if bash "${TMP_DIR}/install.sh" --auto "$cfg" >>"$LOG_FILE" 2>&1; then
-        log "OK: $cfg"
-    else
-        log "ERROR applying update for $cfg - left previous tunnel running for this host."
-        FAILED=1
-    fi
+    bash "${TMP_DIR}/install.sh" --auto "$cfg" >>"$LOG_FILE" 2>&1
+    rc=$?
+    case "$rc" in
+        0) log "OK: $cfg" ;;
+        # install.sh's EXIT_BRIDGE_OFFLINE: files applied, tunnel unverified.
+        3)
+            log "Applied laptop files for $cfg, but its bridge is unreachable - will verify on the next run."
+            FAILED=1
+            ;;
+        *)
+            log "ERROR applying update for $cfg - left previous tunnel running for this host."
+            FAILED=1
+            ;;
+    esac
 done
 
 if [ "$FAILED" = "0" ]; then

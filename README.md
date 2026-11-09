@@ -189,6 +189,12 @@ when the repository's `VERSION` is deliberately increased. Downloaded shell
 scripts are syntax-checked before Relay uses them; if a check fails, the
 current working installation remains in place.
 
+A laptop that can't reach its bridge (bridge off, Tailscale down, or a
+different network) still installs the update's laptop-side files, but does not
+record the new `VERSION` until a later run can reach the bridge and confirm the
+tunnel. A rejected SSH key or a changed host key still stops the update and
+leaves everything as it was.
+
 Automatic laptop updates require SSH-key authentication. If you chose password
 authentication, re-run `laptop/install.sh` to update that laptop.
 
@@ -216,14 +222,9 @@ authentication, re-run `laptop/install.sh` to update that laptop.
   Studio unusable without the bridge. The current installer clears a local ADB
   server only when ssh can log in to the bridge and bind the tunnel's ports,
   and that server had no usable device when Relay checked; otherwise it leaves
-  it alone and retries about every 15 seconds. A laptop on an older install
-  that can't reach the bridge can't update itself. On a Mac, pause its tunnel
-  until it can: find its name with `ls ~/Library/LaunchAgents/com.adbtunnel.*`
-  (not the `.updater` one), then run
-  `launchctl bootout gui/$(id -u)/<that name without .plist>`. It comes back at
-  the next login or the next install. A Windows laptop on an older install
-  keeps clearing local ADB until it updates: once it can reach the bridge, run
-  `bash laptop/check-for-updates.sh` in Git Bash.
+  it alone and retries about every 15 seconds. Laptops pick up this fix even
+  while the bridge is unreachable (see [Updates](#updates)): wait for the
+  nightly run, or run `bash laptop/check-for-updates.sh` now.
 - **The tunnel stays down and the log says a local adb server `has been used
   for` a device, `didn't answer`, or `refused to shut down`:** a phone, Control
   Hub or other device was attached through this laptop's own ADB server, so

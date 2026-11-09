@@ -102,10 +102,32 @@ if [ "$AUTO" = "1" ]; then
         warning "Password-auth config found under --auto - this should never happen (password configs aren't supposed to get an updater registered)."
         exit 1
     fi
-    if ! ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 "${REMOTE_USER}@${REMOTE_HOST}" 'echo ok' >/dev/null 2>&1; then
-        warning "Key auth check failed for ${REMOTE_HOST} - not touching the existing tunnel. (Key may be revoked, host may be down. Fix manually, don't blind-retry.)"
-        exit 1
-    fi
+    # A bridge that can't be reached at all (powered off, Tailscale down, this
+    # laptop on another network) is not a reason to skip the update: the
+    # laptop-side files - above all the guard that decides whether local adb
+    # survives while the bridge is away - don't need the bridge. Without this,
+    # the laptops that most need a guard fix are exactly the ones that can
+    # never receive it. Such a run still installs everything, then exits
+    # EXIT_BRIDGE_OFFLINE instead of 0: the updater (old or new) only records
+    # a VERSION on exit 0, so a later run re-applies once the bridge answers
+    # and the health check below can really verify the tunnel.
+    # Anything else (key rejected, host key changed) still aborts untouched.
+    EXIT_BRIDGE_OFFLINE=3
+    BRIDGE_OFFLINE=0
+    AUTH_CHECK_ERR="$(ssh -i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 "${REMOTE_USER}@${REMOTE_HOST}" 'echo ok' </dev/null 2>&1 >/dev/null)" || {
+        AUTH_CHECK_ERR="$(printf '%s\n' "$AUTH_CHECK_ERR" | tr -d '\r' | awk 'NF { line = $0 } END { print line }')"
+        case "$AUTH_CHECK_ERR" in
+            *"Network is unreachable"*|*"timed out"*|*"Connection refused"*|*"No route to host"*|*"Host is down"*|\
+            *"Could not resolve hostname"*|*"Name or service not known"*|*"nodename nor servname"*|*"Temporary failure in name resolution"*)
+                BRIDGE_OFFLINE=1
+                important "Bridge ${REMOTE_HOST} is unreachable (${AUTH_CHECK_ERR}) - updating this laptop's files anyway; the tunnel will be verified on a later run."
+                ;;
+            *)
+                warning "Key auth check failed for ${REMOTE_HOST}${AUTH_CHECK_ERR:+ (${AUTH_CHECK_ERR})} - not touching the existing tunnel. (Key may be revoked or the host key changed. Fix manually, don't blind-retry.)"
+                exit 1
+                ;;
+        esac
+    }
 else
     section "=== ADB Bridge Tunnel Setup ==="
     read -rp "Remote host (IP, Tailscale address, or hostname): " REMOTE_HOST
@@ -1173,6 +1195,12 @@ esac
 # local port state directly instead of trusting that.
 HEALTH_OK=1
 TUNNEL_WAITING=0
+if [ "$AUTO" = "1" ] && [ "${BRIDGE_OFFLINE:-0}" = "1" ]; then
+    # Nothing to verify against: ssh can't reach the bridge, so the guard is
+    # (correctly) holding off. See EXIT_BRIDGE_OFFLINE above.
+    important "Laptop files updated for ${REMOTE_HOST}; tunnel not verified because the bridge is unreachable."
+    exit "$EXIT_BRIDGE_OFFLINE"
+fi
 if [ "$PLATFORM" = "mac" ]; then
     # The adb port only counts as up if the tunnel's ssh owns it on 127.0.0.1.
     # "Something is listening" is not enough: it also passes for a rogue local
