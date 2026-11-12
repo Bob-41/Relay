@@ -171,17 +171,51 @@ case "$PLATFORM" in
         ;;
 esac
 
+# --- adb environment overrides ---
+# The tunnel binds loopback only, so adb's default server (127.0.0.1:5037) is
+# the tunnel. ANDROID_ADB_SERVER_ADDRESS / ANDROID_ADB_SERVER_PORT silently
+# redirect every adb client - including Gradle and Android Studio, which
+# inherit them - somewhere else, and `adb -P` does not override the address.
+# The result is indistinguishable from a broken tunnel: refused/empty device
+# list while Relay's ssh holds the port. Seen in the wild as an old bridge LAN
+# IP left in ~/.zshrc after the bridge moved.
+section "adb environment overrides"
+ADB_ENV_ADDRESS="${ANDROID_ADB_SERVER_ADDRESS:-}"
+ADB_ENV_PORT="${ANDROID_ADB_SERVER_PORT:-}"
+ADB_ENV_SOCKET="${ADB_SERVER_SOCKET:-}"
+if [ -z "$ADB_ENV_ADDRESS" ] && [ -z "$ADB_ENV_PORT" ] && [ -z "$ADB_ENV_SOCKET" ]; then
+    note "(none set - adb defaults to 127.0.0.1:5037, which is the tunnel)"
+else
+    [ -n "$ADB_ENV_ADDRESS" ] && note "ANDROID_ADB_SERVER_ADDRESS=${ADB_ENV_ADDRESS}"
+    [ -n "$ADB_ENV_PORT" ] && note "ANDROID_ADB_SERVER_PORT=${ADB_ENV_PORT}"
+    [ -n "$ADB_ENV_SOCKET" ] && note "ADB_SERVER_SOCKET=${ADB_ENV_SOCKET}"
+    case "$ADB_ENV_ADDRESS" in
+        ""|127.0.0.1|localhost|::1) ;;
+        *)
+            note ""
+            note "MISCONFIGURATION: adb is pointed at ${ADB_ENV_ADDRESS}, not the Relay tunnel."
+            note "The tunnel can be perfectly healthy and every adb client still fails"
+            note "with 'cannot connect to daemon at tcp:${ADB_ENV_ADDRESS}:${ADB_ENV_PORT:-5037}'."
+            note "Gradle, Android Studio and the Sloth tasks inherit it too. Fix: remove"
+            note "the export (adb defaults to 127.0.0.1:5037) and restart Android Studio"
+            note "from Finder/Dock, not from a terminal that still has the old value."
+            ;;
+    esac
+fi
+
 # --- What does adb itself see? ---
 section "adb's view"
 if command -v adb >/dev/null 2>&1; then
     note "adb version: $(run_with_timeout 10 adb version 2>/dev/null | head -n1)"
     note ""
-    note "--- adb -P ${LOCAL_PORT} devices -l ---"
-    run_with_timeout 20 adb -P "$LOCAL_PORT" devices -l 2>&1 | sed 's/^/  /'
+    # -H 127.0.0.1 on purpose: these probes test the Relay tunnel, not whatever
+    # a stale ANDROID_ADB_SERVER_ADDRESS happens to point at (reported above).
+    note "--- adb -H 127.0.0.1 -P ${LOCAL_PORT} devices -l ---"
+    run_with_timeout 20 adb -H 127.0.0.1 -P "$LOCAL_PORT" devices -l 2>&1 | sed 's/^/  /'
     note ""
     note "Note: the device list can be stale. Force real traffic to be sure:"
-    note "  adb -P ${LOCAL_PORT} -s 192.168.43.1:5555 shell echo test"
-    if run_with_timeout 20 adb -P "$LOCAL_PORT" -s 192.168.43.1:5555 shell echo test >/dev/null 2>&1; then
+    note "  adb -H 127.0.0.1 -P ${LOCAL_PORT} -s 192.168.43.1:5555 shell echo test"
+    if run_with_timeout 20 adb -H 127.0.0.1 -P "$LOCAL_PORT" -s 192.168.43.1:5555 shell echo test >/dev/null 2>&1; then
         note "  -> Control Hub answered through the tunnel."
     else
         note "  -> Control Hub did NOT answer through the tunnel (or the probe timed out)."

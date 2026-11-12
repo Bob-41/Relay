@@ -93,6 +93,30 @@ if command -v adb >/dev/null 2>&1; then
     fi
 fi
 
+# A stale ANDROID_ADB_SERVER_ADDRESS/ANDROID_ADB_SERVER_PORT in the shell -
+# exported in ~/.zshrc, inherited by Android Studio and every Gradle daemon it
+# spawns - sends every adb client somewhere other than this tunnel. It looks
+# exactly like a broken tunnel: `adb devices` is empty or refused while Relay's
+# ssh still holds the port, and `adb -P` does NOT override the address. Gradle
+# Sloth tasks then fail with "cannot connect to daemon at tcp:<old-ip>:5037".
+# The tunnel is loopback-only by design, so a non-loopback address is always a
+# misconfiguration. Warn, never abort: the variable may be deliberate for a
+# different tool, and stranding a working laptop would be worse.
+ADB_ENV_ADDRESS="${ANDROID_ADB_SERVER_ADDRESS:-}"
+ADB_ENV_PORT="${ANDROID_ADB_SERVER_PORT:-}"
+case "$ADB_ENV_ADDRESS" in
+    ""|127.0.0.1|localhost|::1) ;;
+    *)
+        warning "ANDROID_ADB_SERVER_ADDRESS=${ADB_ENV_ADDRESS} is set on this laptop."
+        warning "Every adb client will skip Relay's tunnel and fail with 'cannot connect to daemon at tcp:${ADB_ENV_ADDRESS}:${ADB_ENV_PORT:-5037}'."
+        important "Remove that export (or set it to 127.0.0.1) in your shell profile, then restart Android Studio from Finder/Dock."
+        ;;
+esac
+if [ -n "$ADB_ENV_PORT" ] && [ "$ADB_ENV_PORT" != "5037" ]; then
+    warning "ANDROID_ADB_SERVER_PORT=${ADB_ENV_PORT} is set on this laptop - Relay's tunnel is on 5037."
+    important "Remove that export or change it to 5037."
+fi
+
 CONFIG_ROOT="${HOME}/.config/adb-tunnel"
 [ "$PLATFORM" = "windows" ] && CONFIG_ROOT="$(cygpath -u "$APPDATA")/adb-tunnel/config"
 mkdir -p "$CONFIG_ROOT"
