@@ -96,10 +96,22 @@ DEFAULT_DEV="$(route_dev_for 1.1.1.1)"
 SESSION_DEV=""
 SSH_PEER="${SSH_CONNECTION:-}"
 SSH_PEER="${SSH_PEER%% *}"
+# sudo drops SSH_CONNECTION by default; fall back to this terminal's login
+# record, which ends in "(<peer address>)" for an SSH session.
+if [ -z "$SSH_PEER" ]; then
+    SSH_PEER="$(who -m 2>/dev/null | sed -n 's/.*(\([^)]*\)).*/\1/p' | head -n 1 || true)"
+fi
 [ -n "$SSH_PEER" ] && SESSION_DEV="$(route_dev_for "$SSH_PEER")"
 [ "$DEFAULT_DEV" = "$WIFI_IFACE" ] && REASONS+=("the default route runs over ${WIFI_IFACE}")
 [ "$SESSION_DEV" = "$WIFI_IFACE" ] && REASONS+=("this SSH session runs over ${WIFI_IFACE}")
-if [ -n "$ACTIVE_UUID" ] && [ "$ACTIVE_UUID" != "$TARGET_UUID" ]; then
+# Any Wi-Fi profile bound to the robot adapter is a known Control Hub (the
+# watchdog falls back to them), so being on one of those is expected. Only an
+# active connection that is not bound to this adapter counts as another network.
+ACTIVE_IFACE_BINDING=""
+if [ -n "$ACTIVE_UUID" ]; then
+    ACTIVE_IFACE_BINDING="$(nmcli -g connection.interface-name connection show uuid "$ACTIVE_UUID" 2>/dev/null | head -n 1 || true)"
+fi
+if [ -n "$ACTIVE_UUID" ] && [ "$ACTIVE_UUID" != "$TARGET_UUID" ] && [ "$ACTIVE_IFACE_BINDING" != "$WIFI_IFACE" ]; then
     REASONS+=("${WIFI_IFACE} is currently connected to '${ACTIVE_NAME:-$ACTIVE_UUID}', not the robot Wi-Fi '${OLD_SSID}'")
 fi
 if [ "${#REASONS[@]}" -gt 0 ]; then
@@ -135,7 +147,10 @@ if nmcli -t -f NAME connection show 2>/dev/null | grep -Fxq -- "$NEW_SSID"; then
     fi
 fi
 
-# Restart the watchdog on every exit path. Without this, a failure after the
+# Stop the watchdog first so it does not try to rejoin the old network while
+# the profile is being rewritten. It reads config.env only at startup, so it
+# has to be restarted afterwards anyway to pick up the new SSID.
+# Restart it on every exit path. Without this, a failure after the
 # stop below leaves the bridge with no watchdog until someone notices.
 TMP_CONFIG=""
 cleanup() {
@@ -166,16 +181,20 @@ nmcli connection modify id "$NEW_SSID" \
     ipv4.never-default yes \
     ipv6.never-default yes
 
-# Keep the previous robot profile so switching back is a re-run, but stop
-# NetworkManager from auto-joining it instead of the new one. Only the known
-# previous target is touched - never another profile that happens to share the
-# adapter (e.g. a home-uplink profile on a hand-fixed bridge).
-if [ "$OLD_SSID" != "$NEW_SSID" ] && nmcli -t -f NAME connection show 2>/dev/null | grep -Fxq -- "$OLD_SSID"; then
-    nmcli connection modify id "$OLD_SSID" connection.autoconnect no
-    echo "Kept previous robot profile '${OLD_SSID}' with auto-connect turned off."
-fi
-
+# Keep the other hubs' profiles: the watchdog falls back to any of them while
+# the new hub is off, and switching back is just a re-run. But stop
+# NetworkManager from auto-joining them itself, or it could pick a fallback
+# hub even while the new one is in range. Matched by adapter rather than by
+# name, so profiles from earlier install.sh runs or that NetworkManager named
+# itself are covered too.
 NEW_UUID="$(profile_uuid "$NEW_SSID")"
+while IFS=: read -r uuid type; do
+    [ "$type" = "802-11-wireless" ] || continue
+    [ "$uuid" = "$NEW_UUID" ] && continue
+    [ "$(nmcli -g connection.interface-name connection show uuid "$uuid")" = "$WIFI_IFACE" ] || continue
+    nmcli connection modify uuid "$uuid" connection.autoconnect no
+    echo "Kept $(nmcli --escape no -g 802-11-wireless.ssid connection show uuid "$uuid") as a fallback hub, auto-connect turned off."
+done < <(nmcli -t -f UUID,TYPE connection show)
 
 # Rewrite only TARGET_SSID in config.env; every other line is kept verbatim.
 # The password is never written here - NetworkManager keeps it in its own
@@ -224,6 +243,8 @@ if [ "$joined" = "1" ]; then
 else
     warning "Not joined to ${NEW_SSID} yet."
     echo "If the Control Hub is off, that's expected - the bridge keeps trying and joins once it's on."
+    echo "Until then it may sit on another known hub (the log says \"Now on fallback hub ...\"),"
+    echo "and it stays there until that hub goes off, so it never cuts off a robot in use."
     echo "Otherwise check the SSID and password and re-run this script. Recent log:"
     tail -n 10 "$LOG_FILE" 2>/dev/null || true
 fi

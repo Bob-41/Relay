@@ -5,7 +5,8 @@
 # etc.) live in /etc/adb-forwarder/config.env, which auto-update never
 # touches.
 #
-# Waits for TARGET_SSID to appear, joins it, connects adb to
+# Waits for TARGET_SSID (or, while it is off, any other Control Hub this
+# bridge has a profile for) to appear, joins it, connects adb to
 # DEVICE_IP:DEVICE_PORT. Loops forever so it self-heals after device
 # power-cycles or this host reboots.
 
@@ -74,20 +75,88 @@ wait_for_adb_server() {
     log "adb-server.service is up."
 }
 
-# NM only refreshes its AP list for an already-associated radio rarely, so a plain
-# `nmcli dev wifi list` can keep reporting a stale list for minutes while the hub is
-# sitting right there. Ask for a fresh scan first. The rescan call can be refused
-# when one just ran - harmless, the list below still reads the latest results.
-ssid_visible() {
-    nmcli dev wifi rescan ifname "$WIFI_IFACE" >/dev/null 2>&1 || true
-    sleep 2
-    nmcli -f SSID dev wifi list ifname "$WIFI_IFACE" --rescan no 2>/dev/null | grep -qF "$TARGET_SSID"
+# Every NetworkManager Wi-Fi profile bound to the robot adapter is a known
+# Control Hub: the configured one (TARGET_SSID) plus any hub set up earlier by
+# install.sh or change-robot-wifi.sh. When the configured hub is off, the
+# watchdog falls back to whichever known hub is in range - every Control Hub
+# serves adb at the same DEVICE_IP, so laptops do not notice the switch.
+# Profiles are handled by UUID throughout, which never needs escaping.
+
+target_hub_uuid() {
+    nmcli -g connection.uuid connection show id "$TARGET_SSID" 2>/dev/null | head -n 1
 }
 
-wait_for_ssid() {
-    log "Scanning for $TARGET_SSID on ${WIFI_IFACE}..."
-    local waited=0 relog=0
-    while ! ssid_visible; do
+# Known hub UUIDs, configured hub first so it is preferred when several are
+# in range.
+known_hub_uuids() {
+    local target uuid type
+    target="$(target_hub_uuid)"
+    [ -n "$target" ] && echo "$target"
+    while IFS=: read -r uuid type; do
+        [ "$type" = "802-11-wireless" ] || continue
+        [ "$uuid" = "$target" ] && continue
+        if [ "$(nmcli -g connection.interface-name connection show uuid "$uuid" 2>/dev/null)" = "$WIFI_IFACE" ]; then
+            echo "$uuid"
+        fi
+    done < <(nmcli -t -f UUID,TYPE connection show 2>/dev/null)
+}
+
+hub_ssid() {
+    nmcli --escape no -g 802-11-wireless.ssid connection show uuid "$1" 2>/dev/null
+}
+
+# "configured hub X" or "fallback hub Y", for log lines.
+describe_hub() {
+    local ssid
+    ssid="$(hub_ssid "$1")"
+    if [ "$1" = "$(target_hub_uuid)" ]; then
+        echo "configured hub $ssid"
+    else
+        echo "fallback hub $ssid"
+    fi
+}
+
+# UUID of the known hub the robot adapter is fully connected to, or nothing.
+# A connection to anything else on the adapter does not count.
+current_hub_uuid() {
+    local uuid
+    uuid="$(nmcli -t -f UUID,DEVICE,STATE connection show --active 2>/dev/null \
+        | awk -F: -v d="$WIFI_IFACE" '$2 == d && $3 == "activated" { print $1; exit }')"
+    [ -n "$uuid" ] || return 1
+    known_hub_uuids | grep -Fxq "$uuid" || return 1
+    echo "$uuid"
+}
+
+# Scan until a known hub is broadcasting, then set PICKED_HUB to its UUID: the
+# configured hub if it is visible, otherwise the first visible fallback. Uses a
+# global instead of stdout because log() also writes to stdout.
+PICKED_HUB=""
+wait_for_known_hub() {
+    log "Scanning on ${WIFI_IFACE} for $TARGET_SSID or another known Control Hub..."
+    local waited=0 relog=0 visible uuid ssid
+    while true; do
+        PICKED_HUB=""
+        # NM only refreshes its AP list for an already-associated radio rarely,
+        # so a plain `nmcli dev wifi list` can keep reporting a stale list for
+        # minutes while the hub is sitting right there. Ask for a fresh scan
+        # first. The rescan call can be refused when one just ran - harmless,
+        # the list below still reads the latest results.
+        nmcli dev wifi rescan ifname "$WIFI_IFACE" >/dev/null 2>&1 || true
+        sleep 2
+        # Exact line match against SSIDs, so one hub's name being a prefix of
+        # another's (e.g. "1234-RC" and "1234-RC-B") cannot cause a false hit.
+        visible="$(nmcli --escape no -g SSID dev wifi list ifname "$WIFI_IFACE" --rescan no 2>/dev/null)"
+        if [ -n "$visible" ]; then
+            while read -r uuid; do
+                ssid="$(hub_ssid "$uuid")"
+                if [ -n "$ssid" ] && printf '%s\n' "$visible" | grep -Fxq -- "$ssid"; then
+                    PICKED_HUB="$uuid"
+                    break
+                fi
+            done < <(known_hub_uuids)
+        fi
+        [ -n "$PICKED_HUB" ] && break
+
         sleep "$CHECK_INTERVAL"
         waited=$((waited + CHECK_INTERVAL))
         relog=$((relog + CHECK_INTERVAL))
@@ -104,38 +173,41 @@ wait_for_ssid() {
                 log "WARNING:   wifis: ${WIFI_IFACE}: {renderer: NetworkManager}   &&   sudo netplan apply"
                 log "WARNING: do that from a local console, not over SSH on this interface - it drops the lease."
             fi
-            log "Still scanning for $TARGET_SSID (${waited}s). Control Hub powered on?"
+            log "Still scanning for $TARGET_SSID or another known Control Hub (${waited}s). Control Hub powered on?"
         fi
 
         if [ "$waited" -ge "$SCAN_TIMEOUT" ]; then
-            log "ERROR: $TARGET_SSID not visible after ${waited}s."
+            log "ERROR: no known Control Hub visible after ${waited}s."
             if ! iface_is_managed; then
                 log "ERROR: root cause is that ${WIFI_IFACE} is unmanaged by NetworkManager."
+            elif [ -z "$(known_hub_uuids)" ]; then
+                log "ERROR: there is no Wi-Fi profile for ${WIFI_IFACE} at all. Re-run bridge/change-robot-wifi.sh."
             else
-                log "ERROR: not seen in any fresh scan on this radio. The Control Hub may be off or out of range,"
+                log "ERROR: no known Control Hub was seen in any fresh scan on this radio. The hubs may be off or out of range,"
                 log "ERROR: or on a band this radio cannot see (the hub has moved between 2.4 and 5 GHz before)."
             fi
             log "ERROR: retrying from scratch."
             return 1
         fi
     done
-    log "$TARGET_SSID is visible after ${waited}s."
+    log "$(describe_hub "$PICKED_HUB") is visible after ${waited}s."
     return 0
 }
 
-join_ssid() {
-    log "Joining $TARGET_SSID..."
+join_hub() {
+    local desc out
+    desc="$(describe_hub "$1")"
+    log "Joining ${desc}..."
     # Capture the result so a failure is reported as a failure. Previously this
     # was tee'd straight to the log with no status check, so a rejected join
     # looked identical to a successful one followed by silence.
-    local out
-    if out="$(nmcli connection up "$TARGET_SSID" ifname "$WIFI_IFACE" 2>&1)"; then
+    if out="$(nmcli connection up uuid "$1" ifname "$WIFI_IFACE" 2>&1)"; then
         printf '%s\n' "$out" | tee -a "$LOG_FILE"
-        log "Joined $TARGET_SSID."
+        log "Joined ${desc}."
         return 0
     fi
     printf '%s\n' "$out" | tee -a "$LOG_FILE"
-    log "ERROR: nmcli could not activate $TARGET_SSID on ${WIFI_IFACE}."
+    log "ERROR: nmcli could not activate ${desc} on ${WIFI_IFACE}."
     if ! iface_is_managed; then
         log "ERROR: ${WIFI_IFACE} is unmanaged by NetworkManager - the profile can never activate."
     else
@@ -181,27 +253,33 @@ adb_state() {
     adb -H 127.0.0.1 -P "$ADB_PORT" -s "$DEVICE_IP:$DEVICE_PORT" get-state 2>/dev/null
 }
 
-is_wifi_connected() {
-    # Compare fields exactly (awk, not grep) so TARGET_SSID is never
-    # interpreted as a regex.
-    nmcli -t -f active,ssid dev wifi list ifname "$WIFI_IFACE" | \
-        awk -F: -v ssid="$TARGET_SSID" '$1=="yes" && $2==ssid {found=1} END {exit !found}'
-}
-
 wait_for_adb_server
 
-log "Watchdog running: will keep ${WIFI_IFACE} joined to $TARGET_SSID and adb attached to $DEVICE_IP:$DEVICE_PORT."
+log "Watchdog running: will keep ${WIFI_IFACE} on $TARGET_SSID (or another known Control Hub while it is off) and adb attached to $DEVICE_IP:$DEVICE_PORT."
 
+last_hub=""
 while true; do
-    if ! is_wifi_connected; then
-        log "Not currently joined to $TARGET_SSID."
-        # wait_for_ssid returns non-zero on timeout, but we deliberately keep
-        # looping rather than exiting: the Control Hub may simply be off right
-        # now and should be picked up whenever it powers back on. The point is
-        # that the failure is now visible in the log instead of silent.
-        wait_for_ssid || true
-        join_ssid || true
+    hub="$(current_hub_uuid)"
+    if [ -z "$hub" ]; then
+        log "Not currently joined to any known Control Hub."
+        # wait_for_known_hub returns non-zero on timeout, but we deliberately
+        # keep looping rather than exiting: the Control Hubs may simply be off
+        # right now and should be picked up whenever one powers back on. The
+        # point is that the failure is now visible in the log instead of silent.
+        if wait_for_known_hub; then
+            join_hub "$PICKED_HUB" || true
+        fi
         sleep 3
+        hub="$(current_hub_uuid)"
+        [ -z "$hub" ] && last_hub=""
+    fi
+    # Being on a fallback hub counts as healthy: the watchdog does not pull
+    # the adapter back to the configured hub when it reappears, since that
+    # would cut off whoever is using the fallback robot. It returns to the
+    # configured hub the next time the fallback drops.
+    if [ -n "$hub" ] && [ "$hub" != "$last_hub" ]; then
+        log "Now on $(describe_hub "$hub")."
+        last_hub="$hub"
     fi
     if ! is_adb_alive; then
         # Say what state the hub is actually in when there is one to say. An
@@ -219,7 +297,7 @@ while true; do
         tick=$((tick + 1))
         if [ "$tick" -ge "$HEALTHY_LOG_EVERY" ]; then
             tick=0
-            log "Healthy: joined to $TARGET_SSID, adb attached to $DEVICE_IP:$DEVICE_PORT."
+            log "Healthy: on $(describe_hub "$last_hub"), adb attached to $DEVICE_IP:$DEVICE_PORT."
         fi
     fi
     sleep "$CHECK_INTERVAL"

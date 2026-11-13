@@ -80,17 +80,15 @@ The installer asks for:
    setup, or provide a fixed local-network address.
 3. The Wi-Fi adapter that should join the Control Hub.
 4. The Control Hub Wi-Fi name and password.
-5. Optionally, the port the shared ADB server should listen on (default
-   `5037`, which almost every installation keeps).
 
-At the end it prints the three values every laptop needs:
+At the end it prints the two values every laptop needs:
 
 ```text
 On laptops, point setup at:
-  host: 100.x.y.z   user: your-bridge-user   port: 5037
+  host: 100.x.y.z   user: your-bridge-user
 ```
 
-Enter those same three values on each laptop.
+Enter those same two values on each laptop.
 
 If you choose Tailscale and it is not installed, the installer can install it
 (from the distro package on Arch-family systems) and opens the sign-in step. When setup finishes, save the bridge host/IP and
@@ -141,8 +139,7 @@ cd Relay/laptop
 bash install.sh
 ```
 
-Enter the bridge host/IP and Linux username from Step 1, plus the port it
-printed (press Enter for `5037`). Choose **SSH key**
+Enter the bridge host/IP and Linux username from Step 1. Choose **SSH key**
 authentication when prompted. You enter the bridge password once so Relay can
 add the key; after that, the tunnel reconnects automatically and can receive
 safe nightly updates.
@@ -206,6 +203,14 @@ user, Wi-Fi adapter, adb port, reach address, services, updater - stays as it
 was, and laptops need no changes. The old Wi-Fi profile is kept with
 auto-connect turned off, so you can switch back by running the script again.
 
+Every hub the bridge has a Wi-Fi profile for is a fallback. If the configured
+hub is off, the bridge joins another known hub that is in range, and laptops
+keep working because every Control Hub uses the same address. The log says
+which hub it is on (`Now on configured hub ...` or `Now on fallback hub ...`).
+The bridge stays on a fallback hub until that hub goes off, so it never cuts
+off a robot that is in use. To stop using a hub as a fallback, delete its
+profile with `sudo nmcli connection delete "<hub name>"`.
+
 ## Updates
 
 Relay checks for updates overnight, around 3 AM. An update is applied only
@@ -219,6 +224,12 @@ On the bridge, an applied update is also checked afterwards: the ADB unit must
 be active and its port bound, and if it is not, the previous install is restored
 and the version is not recorded - so a bad release retries the next night
 instead of breaking the bridge quietly.
+
+A laptop that can't reach its bridge (bridge off, Tailscale down, or a
+different network) still installs the update's laptop-side files, but does not
+record the new `VERSION` until a later run can reach the bridge and confirm the
+tunnel. A rejected SSH key or a changed host key still stops the update and
+leaves everything as it was.
 
 Automatic laptop updates require SSH-key authentication. If you chose password
 authentication, re-run `laptop/install.sh` to update that laptop.
@@ -251,13 +262,29 @@ key-auth tunnels; a password-auth laptop has no updater installed.
   and re-run the laptop installer. Relay recognizes and clears a local ADB
   server on that port; it does not automatically kill unknown programs.
 - **The Control Hub disappears overnight and re-running the installer brings it
-  back:** a known bug that the current laptop installer fixes. A sleeping laptop
-  can wake with a local ADB server sitting on port 5037, which made the tunnel
-  bind only half the address it should have, so Android Studio talked to a local
-  server that had never seen the robot. Relay clears that server automatically
-  every time the tunnel (re)starts, on every platform. If it happens again,
-  check the tunnel log for `adb-tunnel-guard` messages - and capture the
-  evidence listed below before re-running anything.
+  back:** this was a known bug and the current laptop installer fixes it. A
+  sleeping laptop can wake with a local ADB server sitting on port 5037, which
+  made the tunnel bind only half the address it should have, so Android Studio
+  talked to a local server that had never seen the robot. Relay now clears an
+  idle local server like that whenever the tunnel (re)starts and can reach the
+  bridge. If it still happens, check the tunnel log for `adb-tunnel-guard`
+  messages - and capture the evidence listed below before re-running anything.
+- **ADB keeps disconnecting while the bridge is off, or while the laptop is on
+  a Control Hub's own Wi-Fi or USB:** older laptop installs shut down every
+  local ADB server each time the tunnel retried, which made adb and Android
+  Studio unusable without the bridge. The current installer clears a local ADB
+  server only when ssh can log in to the bridge and bind the tunnel's ports,
+  and that server had no usable device when Relay checked; otherwise it leaves
+  it alone and retries about every 15 seconds. Laptops pick up this fix even
+  while the bridge is unreachable (see [Updates](#updates)): wait for the
+  nightly run, or run `bash laptop/check-for-updates.sh` now.
+- **The tunnel stays down and the log says a local adb server `has been used
+  for` a device, `didn't answer`, or `refused to shut down`:** a phone, Control
+  Hub or other device was attached through this laptop's own ADB server, so
+  Relay won't take the port from it. Unplug or `adb disconnect` that device,
+  then run `adb kill-server`; the tunnel starts within about 15 seconds. A phone
+  paired for Wireless debugging reconnects to every new ADB server by itself,
+  so turn Wireless debugging off on it.
 - **Panels loads only a blank page:** make sure you are using the current
   laptop installer, which forwards both the Panels web page and its live-data
   WebSocket on port 8002. This is the expected fix; it has not yet been
@@ -289,12 +316,14 @@ installed version, and the tail of the tunnel and updater logs.
 | Windows tunnel | `%APPDATA%\\adb-tunnel\\adb-tunnel-<host>.log` |
 | Windows updater | `%APPDATA%\\adb-tunnel\\updater.log` |
 
-Logs are capped so they cannot fill the disk. On the bridge this depends on
-`logrotate` being installed - the installer writes a rotation policy when it is
-there and says so when it is not, but a bridge without `logrotate` has no size
-cap on `/var/log/adb-forwarder.log`. Laptop logs are trimmed to their newest
-2.5 MB whenever they pass 5 MB - on macOS at install and each time the agent
-restarts, on Windows on every reconnect attempt.
+Logs are capped so they cannot fill the disk. The bridge log rotates weekly at
+5 MB, keeping 4 compressed generations - this depends on `logrotate` being
+installed: the installer writes a rotation policy when it is there and says so
+when it is not, but a bridge without `logrotate` has no size cap on
+`/var/log/adb-forwarder.log`. Laptop tunnel logs are trimmed to their newest
+2.5 MB whenever they pass 5 MB - on macOS at install and each time the tunnel
+restarts, on Windows on every reconnect attempt. The updater logs grow by a few
+lines a night.
 
 While it is working, the bridge watchdog logs every state change, every failed
 join, and a "Healthy" line about once an hour (not every 5 seconds). It says so

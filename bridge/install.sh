@@ -755,7 +755,16 @@ else
     }
     DEFAULT_DEV="$(route_dev_for 1.1.1.1)"
     SESSION_DEV=""
-    SSH_PEER="${SSH_CONNECTION%% *}"
+    # sudo drops SSH_CONNECTION from the environment by default, so under
+    # `sudo bash install.sh` it is normally unset - and with `set -u` a bare
+    # reference aborts the whole installer. Fall back to the login record for
+    # this terminal, which survives sudo: `who -m` ends in "(<peer address>)"
+    # for an SSH session and has no address for a local console.
+    SSH_PEER="${SSH_CONNECTION:-}"
+    SSH_PEER="${SSH_PEER%% *}"
+    if [ -z "$SSH_PEER" ]; then
+        SSH_PEER="$(who -m 2>/dev/null | sed -n 's/.*(\([^)]*\)).*/\1/p' | head -n 1 || true)"
+    fi
     [ -n "$SSH_PEER" ] && SESSION_DEV="$(route_dev_for "$SSH_PEER")"
     if [ "$DEFAULT_DEV" = "$WIFI_IFACE" ] || [ "$SESSION_DEV" = "$WIFI_IFACE" ]; then
         REASON=""
@@ -791,7 +800,11 @@ else
     # reasoning as ROBOT_IP on the laptop side. Not prompted.
     DEVICE_IP="192.168.43.1"
     DEVICE_PORT="5555"
-    read -rp "Local adb server port [5037]: " ADB_PORT; ADB_PORT="${ADB_PORT:-5037}"
+    # The shared adb server always listens on the standard adb port. Not
+    # prompted: every laptop's tunnel assumes 5037, so a different value here
+    # would only produce a bridge no laptop can find. (--auto keeps whatever an
+    # older install saved in config.env.)
+    ADB_PORT="5037"
     LOG_FILE="/var/log/adb-forwarder.log"
  
     echo "Configuring NetworkManager profile for $TARGET_SSID..."
@@ -1101,7 +1114,7 @@ if [ "$AUTO" != "1" ]; then
     fi
     section "=== Setup complete ==="
     important "On laptops, point setup at:"
-    important "  host: ${REACH_IP:-<not set>}   user: ${SERVICE_USER}   port: ${ADB_PORT}"
+    important "  host: ${REACH_IP:-<not set>}   user: ${SERVICE_USER}"
     echo "(plain LAN IP for reference: ${LAN_IP:-unknown})"
     echo ""
     echo "Logs: ${LOG_FILE}  |  journalctl -u adb-forwarder-connect.service"
