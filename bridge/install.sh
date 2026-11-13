@@ -755,7 +755,16 @@ else
     }
     DEFAULT_DEV="$(route_dev_for 1.1.1.1)"
     SESSION_DEV=""
-    SSH_PEER="${SSH_CONNECTION%% *}"
+    # sudo drops SSH_CONNECTION from the environment by default, so under
+    # `sudo bash install.sh` it is normally unset - and with `set -u` a bare
+    # reference aborts the whole installer. Fall back to the login record for
+    # this terminal, which survives sudo: `who -m` ends in "(<peer address>)"
+    # for an SSH session and has no address for a local console.
+    SSH_PEER="${SSH_CONNECTION:-}"
+    SSH_PEER="${SSH_PEER%% *}"
+    if [ -z "$SSH_PEER" ]; then
+        SSH_PEER="$(who -m 2>/dev/null | sed -n 's/.*(\([^)]*\)).*/\1/p' | head -n 1 || true)"
+    fi
     [ -n "$SSH_PEER" ] && SESSION_DEV="$(route_dev_for "$SSH_PEER")"
     if [ "$DEFAULT_DEV" = "$WIFI_IFACE" ] || [ "$SESSION_DEV" = "$WIFI_IFACE" ]; then
         REASON=""

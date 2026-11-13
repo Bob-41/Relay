@@ -96,6 +96,11 @@ DEFAULT_DEV="$(route_dev_for 1.1.1.1)"
 SESSION_DEV=""
 SSH_PEER="${SSH_CONNECTION:-}"
 SSH_PEER="${SSH_PEER%% *}"
+# sudo drops SSH_CONNECTION by default; fall back to this terminal's login
+# record, which ends in "(<peer address>)" for an SSH session.
+if [ -z "$SSH_PEER" ]; then
+    SSH_PEER="$(who -m 2>/dev/null | sed -n 's/.*(\([^)]*\)).*/\1/p' | head -n 1 || true)"
+fi
 [ -n "$SSH_PEER" ] && SESSION_DEV="$(route_dev_for "$SSH_PEER")"
 [ "$DEFAULT_DEV" = "$WIFI_IFACE" ] && REASONS+=("the default route runs over ${WIFI_IFACE}")
 [ "$SESSION_DEV" = "$WIFI_IFACE" ] && REASONS+=("this SSH session runs over ${WIFI_IFACE}")
