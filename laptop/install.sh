@@ -192,17 +192,11 @@ else
     [ -z "$REMOTE_HOST" ] && { echo "Aborting."; exit 1; }
     read -rp 'Remote username (username that you use to log into the remote host ex: "cuttlefish" if you log in as cuttlefish): ' REMOTE_USER
     [ -z "$REMOTE_USER" ] && { echo "Aborting."; exit 1; }
-    # The bridge asks for the port its shared adb server listens on and prints
-    # it at the end of setup ("host: ... user: ... port: ..."). Ask for it here
-    # too: silently forwarding 5037 to a bridge running on any other port is a
-    # tunnel that comes up cleanly, reports healthy, and shows no device - the
-    # most expensive kind of "it works" in this project.
-    read -rp "Remote adb server port (as printed by the bridge installer) [5037]: " REMOTE_PORT
-    REMOTE_PORT="${REMOTE_PORT:-5037}"
-    # LOCAL_PORT stays hardcoded: Android Studio and every adb client on this
-    # laptop look for the server on 5037 and nothing makes them look elsewhere.
-    # If the laptop's own adb port needs to differ, that is a client-side
-    # problem, not something a tunnel can solve.
+    # Both ends use the standard adb port. The bridge installer always runs its
+    # shared adb server on 5037, and Android Studio and every adb client on
+    # this laptop look for the server on 5037. Not prompted. (--auto keeps
+    # whatever an older install saved in its config.)
+    REMOTE_PORT="5037"
     LOCAL_PORT="5037"
 
     # Control Hub AP mode always assigns itself this address - it's a

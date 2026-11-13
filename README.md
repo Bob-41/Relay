@@ -80,17 +80,15 @@ The installer asks for:
    setup, or provide a fixed local-network address.
 3. The Wi-Fi adapter that should join the Control Hub.
 4. The Control Hub Wi-Fi name and password.
-5. Optionally, the port the shared ADB server should listen on (default
-   `5037`, which almost every installation keeps).
 
-At the end it prints the three values every laptop needs:
+At the end it prints the two values every laptop needs:
 
 ```text
 On laptops, point setup at:
-  host: 100.x.y.z   user: your-bridge-user   port: 5037
+  host: 100.x.y.z   user: your-bridge-user
 ```
 
-Enter those same three values on each laptop.
+Enter those same two values on each laptop.
 
 If you choose Tailscale and it is not installed, the installer can install it
 (from the distro package on Arch-family systems) and opens the sign-in step. When setup finishes, save the bridge host/IP and
@@ -141,8 +139,7 @@ cd Relay/laptop
 bash install.sh
 ```
 
-Enter the bridge host/IP and Linux username from Step 1, plus the port it
-printed (press Enter for `5037`). Choose **SSH key**
+Enter the bridge host/IP and Linux username from Step 1. Choose **SSH key**
 authentication when prompted. You enter the bridge password once so Relay can
 add the key; after that, the tunnel reconnects automatically and can receive
 safe nightly updates.
