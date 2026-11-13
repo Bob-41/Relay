@@ -13,7 +13,7 @@
 
 set -uo pipefail
 
-REPO_RAW="https://raw.githubusercontent.com/Bob-41/Relay/main"
+REPO_RAW="https://raw.githubusercontent.com/6165-MSET-Cuttlefish/Relay/main"
 
 case "$(uname -s)" in
     Darwin) CONFIG_ROOT="${HOME}/.config/adb-tunnel"; LOG_FILE="/tmp/adbtunnel-updater.log" ;;
@@ -78,12 +78,20 @@ FAILED=0
 for cfg in "${CONFIG_ROOT}"/*.env; do
     [ -e "$cfg" ] || continue
     log "Updating tunnel config: $cfg"
-    if bash "${TMP_DIR}/install.sh" --auto "$cfg" >>"$LOG_FILE" 2>&1; then
-        log "OK: $cfg"
-    else
-        log "ERROR applying update for $cfg - left previous tunnel running for this host."
-        FAILED=1
-    fi
+    bash "${TMP_DIR}/install.sh" --auto "$cfg" >>"$LOG_FILE" 2>&1
+    rc=$?
+    case "$rc" in
+        0) log "OK: $cfg" ;;
+        # install.sh's EXIT_BRIDGE_OFFLINE: files applied, tunnel unverified.
+        3)
+            log "Applied laptop files for $cfg, but its bridge is unreachable - will verify on the next run."
+            FAILED=1
+            ;;
+        *)
+            log "ERROR applying update for $cfg - left previous tunnel running for this host."
+            FAILED=1
+            ;;
+    esac
 done
 
 if [ "$FAILED" = "0" ]; then

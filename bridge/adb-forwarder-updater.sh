@@ -19,7 +19,7 @@
 
 set -uo pipefail  # not -e: we want to log+exit cleanly on failure, not abort mid-cleanup
 
-REPO_RAW="https://raw.githubusercontent.com/Bob-41/Relay/main"
+REPO_RAW="https://raw.githubusercontent.com/6165-MSET-Cuttlefish/Relay/main"
 STATE_DIR="/etc/adb-forwarder"
 INSTALLED_VERSION_FILE="${STATE_DIR}/installed-version"
 UPDATE_POLICY_FILE="${STATE_DIR}/update-policy"
