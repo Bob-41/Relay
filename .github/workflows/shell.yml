@@ -1,0 +1,54 @@
+name: shell
+
+# The updaters on both sides of this project download scripts from main and run
+# them unattended - as root on every bridge. `bash -n` is the only gate in front
+# of that, so it must not be something a commit can quietly break. This workflow
+# exists so a syntax error can never reach a laptop or a bridge overnight.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find shell scripts
+        id: find
+        run: |
+          find . -name '*.sh' -not -path './.git/*' | sort > scripts.txt
+          cat scripts.txt
+
+      - name: Syntax check (bash -n)
+        run: |
+          status=0
+          while read -r f; do
+            if bash -n "$f"; then
+              echo "ok   $f"
+            else
+              echo "FAIL $f"
+              status=1
+            fi
+          done < scripts.txt
+          exit $status
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      # --severity=error fails on real errors (unquoted expansions that break,
+      # bad test syntax, and similar) and stays stable across shellcheck
+      # versions. Every script in this repo currently also passes clean at
+      # --severity=warning; raise the gate once that stops being true for a
+      # version bump rather than letting a stricter version turn nightly updates
+      # red for everyone.
+      - name: Shellcheck (errors only)
+        run: |
+          status=0
+          while read -r f; do
+            shellcheck --severity=error --external-sources "$f" || status=1
+          done < scripts.txt
+          exit $status

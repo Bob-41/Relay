@@ -70,6 +70,53 @@ if [ "$PLATFORM" = "windows" ]; then
     SSH_BIN_WIN="$(cygpath -w "$(command -v ssh)")"
 fi
 
+# ADB client/server version mismatch is a shared-server outage: an older client
+# can decide the bridge's server is wrong, kill it, and start a private local
+# server - every laptop on that bridge loses the robot. Keep this minimum in
+# sync with MIN_ADB_VERSION in bridge/install.sh. Warn, never abort: the adb on
+# PATH is not necessarily the copy Android Studio actually uses, and stranding
+# an otherwise working laptop would be worse than a stale warning.
+ADB_MIN_VERSION="36.0.0"
+if command -v adb >/dev/null 2>&1; then
+    ADB_CLIENT_VERSION="$(adb version 2>/dev/null | awk '/^Version / { sub(/-.*/, "", $2); print $2; exit }' || true)"
+    if [ -n "$ADB_CLIENT_VERSION" ] && awk -v v="$ADB_CLIENT_VERSION" -v m="$ADB_MIN_VERSION" 'BEGIN {
+            split(v, a, "."); split(m, b, ".")
+            for (i = 1; i <= 3; i++) {
+                if ((a[i] + 0) < (b[i] + 0)) exit 0
+                if ((a[i] + 0) > (b[i] + 0)) exit 1
+            }
+            exit 1
+        }'; then
+        warning "Platform-Tools adb ${ADB_CLIENT_VERSION} on this laptop is older than ${ADB_MIN_VERSION}."
+        warning "A current laptop client kills the bridge's shared adb server and starts its own, breaking every laptop on that bridge."
+        important "Update Android SDK Platform-Tools in Android Studio's SDK Manager before using this tunnel."
+    fi
+fi
+
+# A stale ANDROID_ADB_SERVER_ADDRESS/ANDROID_ADB_SERVER_PORT in the shell -
+# exported in ~/.zshrc, inherited by Android Studio and every Gradle daemon it
+# spawns - sends every adb client somewhere other than this tunnel. It looks
+# exactly like a broken tunnel: `adb devices` is empty or refused while Relay's
+# ssh still holds the port, and `adb -P` does NOT override the address. Gradle
+# Sloth tasks then fail with "cannot connect to daemon at tcp:<old-ip>:5037".
+# The tunnel is loopback-only by design, so a non-loopback address is always a
+# misconfiguration. Warn, never abort: the variable may be deliberate for a
+# different tool, and stranding a working laptop would be worse.
+ADB_ENV_ADDRESS="${ANDROID_ADB_SERVER_ADDRESS:-}"
+ADB_ENV_PORT="${ANDROID_ADB_SERVER_PORT:-}"
+case "$ADB_ENV_ADDRESS" in
+    ""|127.0.0.1|localhost|::1) ;;
+    *)
+        warning "ANDROID_ADB_SERVER_ADDRESS=${ADB_ENV_ADDRESS} is set on this laptop."
+        warning "Every adb client will skip Relay's tunnel and fail with 'cannot connect to daemon at tcp:${ADB_ENV_ADDRESS}:${ADB_ENV_PORT:-5037}'."
+        important "Remove that export (or set it to 127.0.0.1) in your shell profile, then restart Android Studio from Finder/Dock."
+        ;;
+esac
+if [ -n "$ADB_ENV_PORT" ] && [ "$ADB_ENV_PORT" != "5037" ]; then
+    warning "ANDROID_ADB_SERVER_PORT=${ADB_ENV_PORT} is set on this laptop - Relay's tunnel is on 5037."
+    important "Remove that export or change it to 5037."
+fi
+
 CONFIG_ROOT="${HOME}/.config/adb-tunnel"
 [ "$PLATFORM" = "windows" ] && CONFIG_ROOT="$(cygpath -u "$APPDATA")/adb-tunnel/config"
 mkdir -p "$CONFIG_ROOT"
@@ -91,12 +138,23 @@ if [ "$AUTO" = "1" ]; then
     # this forward existed, same pattern as WEB_LOCAL_PORT above.
     PANELS_WS_LOCAL_PORT="${PANELS_WS_LOCAL_PORT:-8002}"
     PANELS_WS_REMOTE_PORT="${PANELS_WS_REMOTE_PORT:-8002}"
+    # PedroPathing autotuner. Defaulted for configs saved before this forward
+    # existed, same pattern as the ports above.
+    PEDRO_TUNER_LOCAL_PORT="${PEDRO_TUNER_LOCAL_PORT:-10158}"
+    PEDRO_TUNER_REMOTE_PORT="${PEDRO_TUNER_REMOTE_PORT:-10158}"
+    PEDRO_TUNER_WS_LOCAL_PORT="${PEDRO_TUNER_WS_LOCAL_PORT:-12649}"
+    PEDRO_TUNER_WS_REMOTE_PORT="${PEDRO_TUNER_WS_REMOTE_PORT:-12649}"
     # FTC Dashboard's live-data WebSocket. The page itself comes over
-    # WEB_LOCAL_PORT (/dash), but its client always connects to port 8000 on
-    # the page's own hostname, so the local side MUST be 8000. Without it the
-    # page loads but sits on "Op mode controls have not initialized".
+    # WEB_LOCAL_PORT (/dash), but the client always connects to port 8000 on
+    # the page's own hostname, so the LOCAL side must stay 8000 - it is not a
+    # free choice. Without this forward the page loads but sits on "Op mode
+    # controls have not initialized".
     DASH_WS_LOCAL_PORT="${DASH_WS_LOCAL_PORT:-8000}"
     DASH_WS_REMOTE_PORT="${DASH_WS_REMOTE_PORT:-8000}"
+    # Extra forward requested for port 8092 on the Control Hub. Defaulted for
+    # configs saved before this forward existed, same pattern as the ports above.
+    HUB_8092_LOCAL_PORT="${HUB_8092_LOCAL_PORT:-8092}"
+    HUB_8092_REMOTE_PORT="${HUB_8092_REMOTE_PORT:-8092}"
     section "=== ADB Tunnel auto-update (${REMOTE_HOST}), replaying saved config ==="
     if [ "$AUTH_CHOICE" != "1" ]; then
         warning "Password-auth config found under --auto - this should never happen (password configs aren't supposed to get an updater registered)."
@@ -134,7 +192,17 @@ else
     [ -z "$REMOTE_HOST" ] && { echo "Aborting."; exit 1; }
     read -rp 'Remote username (username that you use to log into the remote host ex: "cuttlefish" if you log in as cuttlefish): ' REMOTE_USER
     [ -z "$REMOTE_USER" ] && { echo "Aborting."; exit 1; }
-    REMOTE_PORT="5037"
+    # The bridge asks for the port its shared adb server listens on and prints
+    # it at the end of setup ("host: ... user: ... port: ..."). Ask for it here
+    # too: silently forwarding 5037 to a bridge running on any other port is a
+    # tunnel that comes up cleanly, reports healthy, and shows no device - the
+    # most expensive kind of "it works" in this project.
+    read -rp "Remote adb server port (as printed by the bridge installer) [5037]: " REMOTE_PORT
+    REMOTE_PORT="${REMOTE_PORT:-5037}"
+    # LOCAL_PORT stays hardcoded: Android Studio and every adb client on this
+    # laptop look for the server on 5037 and nothing makes them look elsewhere.
+    # If the laptop's own adb port needs to differ, that is a client-side
+    # problem, not something a tunnel can solve.
     LOCAL_PORT="5037"
 
     # Control Hub AP mode always assigns itself this address - it's a
@@ -144,18 +212,29 @@ else
 
     # Local (laptop-side) forward ports - hardcoded, not prompted, per
     # explicit request. Trade-off: if a laptop already has something
-    # bound to 8091 or 8001, ExitOnForwardFailure=yes means the WHOLE
-    # tunnel (including the ADB forward) fails to start, and the fix is
-    # editing these values in the script rather than answering a prompt.
+    # bound to one of these, ExitOnForwardFailure=yes means the WHOLE
+    # tunnel (including the ADB forward) fails to start. The fix is editing
+    # these values in the script - except 8000, which Dashboard's client
+    # hardcodes, so free that port instead.
     WEB_LOCAL_PORT="8091"
     WEB_REMOTE_PORT="8080"
     PANELS_LOCAL_PORT="8001"
     PANELS_REMOTE_PORT="8001"
     PANELS_WS_LOCAL_PORT="8002"
     PANELS_WS_REMOTE_PORT="8002"
-    # FTC Dashboard WebSocket - local side must stay 8000 (see --auto block).
+    # PedroPathing autotuner - same port on both sides, hardcoded like the rest.
+    PEDRO_TUNER_LOCAL_PORT="10158"
+    PEDRO_TUNER_REMOTE_PORT="10158"
+    # The autotuner's page opens a WebSocket to localhost:12649 on its own.
+    PEDRO_TUNER_WS_LOCAL_PORT="12649"
+    PEDRO_TUNER_WS_REMOTE_PORT="12649"
+    # FTC Dashboard's live-data WebSocket. Local 8000 is fixed by the dashboard
+    # client (ws://<page hostname>:8000), same reasoning as the other web ports.
     DASH_WS_LOCAL_PORT="8000"
     DASH_WS_REMOTE_PORT="8000"
+    # Port 8092 on the Control Hub - same port on both sides, hardcoded like the rest.
+    HUB_8092_LOCAL_PORT="8092"
+    HUB_8092_REMOTE_PORT="8092"
 
     echo ""
     important "Auth Method:"
@@ -180,9 +259,19 @@ else
         if [ "$PLATFORM" != "windows" ] && command -v ssh-copy-id >/dev/null 2>&1; then
             ssh-copy-id -i "${KEY}.pub" -o StrictHostKeyChecking=accept-new "${REMOTE_USER}@${REMOTE_HOST}"
         else
-            PUBKEY="$(cat "${KEY}.pub")"
-            ssh -o StrictHostKeyChecking=accept-new "${REMOTE_USER}@${REMOTE_HOST}" \
-                "mkdir -p ~/.ssh && chmod 700 ~/.ssh && echo '${PUBKEY}' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+            # Windows (and any shell without ssh-copy-id) takes this path. The
+            # old `echo '<key>' >> authorized_keys` appended unconditionally, so
+            # every rerun added another copy of the same line - which is where a
+            # bridge's authorized_keys grows three copies of one person's key and
+            # nobody knows why. Pipe the key in on stdin and let the remote side
+            # decide: no shell-escaping of a comment field that may contain
+            # quotes, and no duplicates.
+            if ! ssh -o StrictHostKeyChecking=accept-new "${REMOTE_USER}@${REMOTE_HOST}" \
+                'mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys && key="$(cat)" && if grep -qxF "$key" ~/.ssh/authorized_keys 2>/dev/null; then echo "key already present, not adding a duplicate"; else printf "%s\n" "$key" >> ~/.ssh/authorized_keys && echo "key added"; fi' \
+                < "${KEY}.pub"; then
+                warning "Could not install the public key on ${REMOTE_HOST}. Aborting."
+                exit 1
+            fi
         fi
         if ! ssh -i "$KEY" -o BatchMode=yes "${REMOTE_USER}@${REMOTE_HOST}" 'echo ok' >/dev/null 2>&1; then
             warning "Key auth failed. Aborting."; exit 1
@@ -218,8 +307,14 @@ PANELS_LOCAL_PORT="${PANELS_LOCAL_PORT}"
 PANELS_REMOTE_PORT="${PANELS_REMOTE_PORT}"
 PANELS_WS_LOCAL_PORT="${PANELS_WS_LOCAL_PORT}"
 PANELS_WS_REMOTE_PORT="${PANELS_WS_REMOTE_PORT}"
+PEDRO_TUNER_LOCAL_PORT="${PEDRO_TUNER_LOCAL_PORT}"
+PEDRO_TUNER_REMOTE_PORT="${PEDRO_TUNER_REMOTE_PORT}"
+PEDRO_TUNER_WS_LOCAL_PORT="${PEDRO_TUNER_WS_LOCAL_PORT}"
+PEDRO_TUNER_WS_REMOTE_PORT="${PEDRO_TUNER_WS_REMOTE_PORT}"
 DASH_WS_LOCAL_PORT="${DASH_WS_LOCAL_PORT}"
 DASH_WS_REMOTE_PORT="${DASH_WS_REMOTE_PORT}"
+HUB_8092_LOCAL_PORT="${HUB_8092_LOCAL_PORT}"
+HUB_8092_REMOTE_PORT="${HUB_8092_REMOTE_PORT}"
 AUTH_CHOICE="${AUTH_CHOICE}"
 KEY="${KEY}"
 PASSFILE="${PASSFILE}"
@@ -249,7 +344,7 @@ SAFE_HOST="${REMOTE_HOST//[^a-zA-Z0-9]/_}"
 # the respawn gap in normal operation - this only handles an explicit rerun.
 teardown_previous_install() {
     local removed=0 pid name check_port cmdline killed=0
-    # The four forwarded ports are hardcoded constants, never prompted, so a
+    # The forwarded ports are hardcoded constants, never prompted, so a
     # laptop can only ever hold ONE Relay tunnel - a second registration for
     # the same ports is always a leftover, never a legitimate second bridge.
     # Match on the artifact pattern, never on SAFE_HOST: SAFE_HOST is derived
@@ -277,13 +372,13 @@ teardown_previous_install() {
                 rm -f "$prev_plist"
                 removed=1
             done
-            # Reap by PORT, not by name. An ssh holding one of the four forwarded
+            # Reap by PORT, not by name. An ssh holding one of the forwarded
             # ports IS a Relay tunnel for this laptop - the ports are
             # hardcoded, so there is no legitimate second tunnel. Name-scoped
             # matching would miss a tunnel registered under a different host
             # string, which is exactly the hostname -> Tailscale IP case.
             #
-            # Check ALL four ports, not just LOCAL_PORT: with
+            # Check every forwarded port, not just LOCAL_PORT: with
             # ExitOnForwardFailure=yes a stale tunnel ssh holding only 8091
             # still takes the whole new tunnel down, adb forward included.
             # Only `ssh` is ever killed, and only when it actually looks like one of
@@ -300,7 +395,7 @@ teardown_previous_install() {
             # lsof here is macOS-only; the Windows equivalent is the PowerShell
             # block further down, which stops ssh.exe for this host before it
             # re-registers.
-            for check_port in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT" "$DASH_WS_LOCAL_PORT"; do
+            for check_port in "$LOCAL_PORT" "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT" "$PEDRO_TUNER_LOCAL_PORT" "$PEDRO_TUNER_WS_LOCAL_PORT" "$DASH_WS_LOCAL_PORT" "$HUB_8092_LOCAL_PORT"; do
                 for pid in $(lsof -nP -tiTCP:"$check_port" -sTCP:LISTEN 2>/dev/null | sort -u); do
                     name="$(basename "$(ps -p "$pid" -o comm= 2>/dev/null)")"
                     if [ "$name" != "ssh" ]; then
@@ -444,14 +539,39 @@ elif command -v lsof >/dev/null 2>&1; then
     fi
 fi
 
+# linux_port_held_by_ssh <port> [bind-address] - is Relay's own ssh listening?
+# Same question the macOS lsof and Windows netstat checks ask, in the tool a
+# plain Linux box actually has. Falls back to a bare connect probe where neither
+# ss nor lsof exists, which cannot prove ownership - the caller reports that
+# distinction rather than claiming a verified tunnel.
+linux_port_held_by_ssh() {
+    local port="$1" addr="${2:-}"
+    local filter=":${port}\$"
+    [ -n "$addr" ] && filter="^${addr}:${port}\$"
+    if command -v ss >/dev/null 2>&1; then
+        ss -ltnpH 2>/dev/null | awk -v p="$filter" '$4 ~ p' | grep -q '(("ssh"'
+    elif command -v lsof >/dev/null 2>&1; then
+        local lsof_filter="-iTCP:${port}"
+        [ -n "$addr" ] && lsof_filter="-iTCP@${addr}:${port}"
+        lsof -nP "$lsof_filter" -sTCP:LISTEN -Fc 2>/dev/null | grep -qx 'cssh'
+    else
+        ( exec 3<>"/dev/tcp/${addr:-127.0.0.1}/$port" ) 2>/dev/null
+    fi
+}
+
 # --- Port conflict check for the web-interface forwards (warn-only, never auto-killed) ---
-for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT" "$DASH_WS_LOCAL_PORT"; do
+for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT" "$PEDRO_TUNER_LOCAL_PORT" "$PEDRO_TUNER_WS_LOCAL_PORT" "$DASH_WS_LOCAL_PORT" "$HUB_8092_LOCAL_PORT"; do
+    if [ "$CHECK_PORT" = "$DASH_WS_LOCAL_PORT" ]; then
+        PORT_NOTE="NOTE: local port $CHECK_PORT is FTC Dashboard's live-data WebSocket, and its client hardcodes that port - it cannot be moved. Free it before starting the tunnel; ExitOnForwardFailure takes down the whole tunnel, adb included, if it is occupied."
+    else
+        PORT_NOTE="NOTE: something is on local port $CHECK_PORT already - expected if the old tunnel is still up; it'll be replaced below. If this is the web-interface port and it's a leftover dev server (Tomcat/webpack/etc. commonly squat 8080), pick a different WEB_LOCAL_PORT instead of assuming it's safe to kill."
+    fi
     if [ "$PLATFORM" = "windows" ]; then
         if command -v netstat >/dev/null 2>&1 && netstat -ano 2>/dev/null | grep -q ":${CHECK_PORT} .*LISTENING"; then
-            important "NOTE: something is on local port $CHECK_PORT already - expected if the old tunnel is still up; it'll be replaced below. If this is the web-interface port and it's a leftover dev server (Tomcat/webpack/etc. commonly squat 8080), pick a different WEB_LOCAL_PORT instead of assuming it's safe to kill."
+            important "$PORT_NOTE"
         fi
     elif command -v lsof >/dev/null 2>&1 && lsof -iTCP:"$CHECK_PORT" -sTCP:LISTEN -P >/dev/null 2>&1; then
-        important "NOTE: something is on local port $CHECK_PORT already - expected if the old tunnel is still up; it'll be replaced below. If this is the web-interface port and it's a leftover dev server (Tomcat/webpack/etc. commonly squat 8080), pick a different WEB_LOCAL_PORT instead of assuming it's safe to kill."
+        important "$PORT_NOTE"
     fi
 done
 
@@ -654,7 +774,13 @@ GUARD_EOF
         <string>-L</string>
         <string>${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT}</string>
         <string>-L</string>
+        <string>${PEDRO_TUNER_LOCAL_PORT}:${ROBOT_IP}:${PEDRO_TUNER_REMOTE_PORT}</string>
+        <string>-L</string>
+        <string>${PEDRO_TUNER_WS_LOCAL_PORT}:${ROBOT_IP}:${PEDRO_TUNER_WS_REMOTE_PORT}</string>
+        <string>-L</string>
         <string>${DASH_WS_LOCAL_PORT}:${ROBOT_IP}:${DASH_WS_REMOTE_PORT}</string>
+        <string>-L</string>
+        <string>${HUB_8092_LOCAL_PORT}:${ROBOT_IP}:${HUB_8092_REMOTE_PORT}</string>
         <string>${REMOTE_USER}@${REMOTE_HOST}</string>"
     else
         SSHPASS_BIN="$(command -v sshpass)"
@@ -681,7 +807,13 @@ GUARD_EOF
         <string>-L</string>
         <string>${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT}</string>
         <string>-L</string>
+        <string>${PEDRO_TUNER_LOCAL_PORT}:${ROBOT_IP}:${PEDRO_TUNER_REMOTE_PORT}</string>
+        <string>-L</string>
+        <string>${PEDRO_TUNER_WS_LOCAL_PORT}:${ROBOT_IP}:${PEDRO_TUNER_WS_REMOTE_PORT}</string>
+        <string>-L</string>
         <string>${DASH_WS_LOCAL_PORT}:${ROBOT_IP}:${DASH_WS_REMOTE_PORT}</string>
+        <string>-L</string>
+        <string>${HUB_8092_LOCAL_PORT}:${ROBOT_IP}:${HUB_8092_REMOTE_PORT}</string>
         <string>${REMOTE_USER}@${REMOTE_HOST}</string>"
     fi
 
@@ -733,7 +865,16 @@ EOF
         UPDATER_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adb-tunnel-updater.sh"
         if [ -f "$UPDATER_SRC" ] && bash -n "$UPDATER_SRC"; then
             UPDATER_DEST="${CONFIG_ROOT}/../adb-tunnel-updater.sh"
-            install -m 755 "$UPDATER_SRC" "$UPDATER_DEST" 2>/dev/null || cp "$UPDATER_SRC" "$UPDATER_DEST" && chmod 755 "$UPDATER_DEST"
+            # Replace by rename, never in place: the nightly updater may be
+            # executing this very file while install.sh --auto rewrites it.
+            if cp "$UPDATER_SRC" "${UPDATER_DEST}.new.$$" 2>/dev/null \
+                && chmod 755 "${UPDATER_DEST}.new.$$" 2>/dev/null \
+                && mv -f "${UPDATER_DEST}.new.$$" "$UPDATER_DEST"; then
+                :
+            else
+                rm -f "${UPDATER_DEST}.new.$$" 2>/dev/null || true
+                echo "Auto-update could not be installed to ${UPDATER_DEST}."
+            fi
             UPDATER_PLIST="$HOME/Library/LaunchAgents/com.adbtunnel.updater.plist"
             cat > "$UPDATER_PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1039,7 +1180,10 @@ PRUNE_EOF
         -L "${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT}"
         -L "${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT}"
         -L "${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT}"
+        -L "${PEDRO_TUNER_LOCAL_PORT}:${ROBOT_IP}:${PEDRO_TUNER_REMOTE_PORT}"
+        -L "${PEDRO_TUNER_WS_LOCAL_PORT}:${ROBOT_IP}:${PEDRO_TUNER_WS_REMOTE_PORT}"
         -L "${DASH_WS_LOCAL_PORT}:${ROBOT_IP}:${DASH_WS_REMOTE_PORT}"
+        -L "${HUB_8092_LOCAL_PORT}:${ROBOT_IP}:${HUB_8092_REMOTE_PORT}"
     )
     if [ "$AUTH_CHOICE" = "1" ]; then
         TUNNEL_CMD=("$SSH_BIN_WIN" -i "$(cygpath -w "$KEY")" -N -o BatchMode=yes)
@@ -1090,7 +1234,7 @@ EOF
 
     PS1="${INSTALL_DIR}/install-task-${SAFE_HOST}.ps1"
     cat > "$PS1" <<'PSEOF'
-param([string]$TaskName, [string]$Launcher, [string]$RemoteHost)
+param([string]$TaskName, [string]$Launcher, [string]$Ports)
 Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 # Unregistering leaves a running loop behind, and once its ssh dies its cmd.exe
 # reads the rewritten .bat from where it was and becomes a second loop.
@@ -1099,9 +1243,32 @@ foreach ($image in 'wscript.exe', 'cmd.exe') {
         Where-Object { $_.CommandLine -match 'adb-tunnel-[^\\"]+\.(vbs|bat)' } |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
-Get-CimInstance Win32_Process -Filter "Name='ssh.exe' or Name='sshpass.exe'" |
-    Where-Object { $_.CommandLine -and $_.CommandLine.Contains($RemoteHost) } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+# Stop only an ssh that is holding one of Relay's own forwarded ports.
+#
+# The previous version of this script matched on the bridge host appearing
+# anywhere in the command line, which also matched every interactive
+# `ssh user@bridge` the operator had open in another terminal - it killed their
+# own shell sessions during an ordinary reinstall. Holding a Relay forward port
+# is the actual test: those ports are Relay's by definition here, and an
+# ssh that owns one of them is this laptop's previous tunnel (or a rogue local
+# adb, which the guard handles). A non-ssh listener is somebody's dev server:
+# reported, never touched.
+$portList = @($Ports -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ })
+foreach ($port in $portList) {
+    $owners = @(Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue |
+               Select-Object -ExpandProperty OwningProcess -Unique)
+    foreach ($procId in $owners) {
+        $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
+        if (-not $proc) { continue }
+        if ($proc.ProcessName -ne 'ssh') {
+            Write-Output ("port {0} is held by {1} (pid {2}) - leaving it alone." -f $port, $proc.ProcessName, $procId)
+            continue
+        }
+        Write-Output ("stopping stale Relay tunnel ssh (pid {0}) still holding port {1}." -f $procId, $port)
+        Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+    }
+}
+Start-Sleep -Milliseconds 500
 try {
     $Action   = New-ScheduledTaskAction -Execute "$env:WINDIR\System32\wscript.exe" -Argument "`"$Launcher`""
     $Trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
@@ -1120,7 +1287,7 @@ PSEOF
     STARTUP_BAT="${STARTUP_DIR}/adb-tunnel-${SAFE_HOST}.bat"
     # The health check below reads the guard's message, so it must be this run's.
     rm -f "${INSTALL_DIR}/guard-${LOCAL_PORT}.msg"
-    if powershell -NoProfile -ExecutionPolicy Bypass -File "$PS1_WIN" -TaskName "$TASK_NAME" -Launcher "$WIN_WRAPPER_VBS" -RemoteHost "$REMOTE_HOST"; then
+    if powershell -NoProfile -ExecutionPolicy Bypass -File "$PS1_WIN" -TaskName "$TASK_NAME" -Launcher "$WIN_WRAPPER_VBS" -Ports "${LOCAL_PORT},${WEB_LOCAL_PORT},${PANELS_LOCAL_PORT},${PANELS_WS_LOCAL_PORT},${PEDRO_TUNER_LOCAL_PORT},${PEDRO_TUNER_WS_LOCAL_PORT},${DASH_WS_LOCAL_PORT},${HUB_8092_LOCAL_PORT}"; then
         important "Tunnel task '${TASK_NAME}' registered via Scheduled Task. Log: ${LOG_FILE_WIN}"
         rm -f "$STARTUP_BAT" "$STARTUP_VBS"  # in case an earlier run fell back to Startup
     else
@@ -1147,7 +1314,16 @@ PSEOF
         UPDATER_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/adb-tunnel-updater.sh"
         if [ -f "$UPDATER_SRC" ] && bash -n "$UPDATER_SRC"; then
             UPDATER_DEST="${INSTALL_DIR}/adb-tunnel-updater.sh"
-            cp "$UPDATER_SRC" "$UPDATER_DEST"
+            # Rename into place, same reason as the macOS path above: a running
+            # updater must never have its own file rewritten underneath it.
+            if cp "$UPDATER_SRC" "${UPDATER_DEST}.new.$$" 2>/dev/null \
+                && chmod 755 "${UPDATER_DEST}.new.$$" 2>/dev/null \
+                && mv -f "${UPDATER_DEST}.new.$$" "$UPDATER_DEST"; then
+                :
+            else
+                rm -f "${UPDATER_DEST}.new.$$" 2>/dev/null || true
+                echo "Auto-update could not be installed to ${UPDATER_DEST}."
+            fi
             BASH_BIN_WIN="$(cygpath -w "$(command -v bash)")"
             UPDATER_DEST_WIN="$(cygpath -w "$UPDATER_DEST")"
             UPD_PS1="${INSTALL_DIR}/install-updater-task.ps1"
@@ -1157,7 +1333,11 @@ Unregister-ScheduledTask -TaskName "ADBTunnelUpdater" -Confirm:$false -ErrorActi
 try {
     $Action   = New-ScheduledTaskAction -Execute $BashBin -Argument "`"$ScriptPath`""
     $Trigger  = New-ScheduledTaskTrigger -Daily -At 3am
-    $Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    # -StartWhenAvailable: a workshop laptop is almost always powered off at 3am,
+    # and without this the daily trigger is simply missed - those machines then
+    # never receive an update, silently, for as long as they stay off overnight.
+    # It runs the check as soon as the machine is next available instead.
+    $Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
     Register-ScheduledTask -TaskName "ADBTunnelUpdater" -Action $Action -Trigger $Trigger -Settings $Settings -Force -ErrorAction Stop | Out-Null
     exit 0
 } catch {
@@ -1176,15 +1356,69 @@ PSEOF
     ;;
 
 linux)
-    echo "No auto-start mechanism set up for plain Linux laptops - use a"
-    echo "systemd --user unit or cron @reboot to persist this command:"
-    if [ "$AUTH_CHOICE" = "1" ]; then
-        echo "  ssh -i $KEY -N -o BatchMode=yes -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} -L ${DASH_WS_LOCAL_PORT}:${ROBOT_IP}:${DASH_WS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST}"
-    else
-        echo "  sshpass -f $PASSFILE ssh -N -L ${LOCAL_PORT}:localhost:${REMOTE_PORT} -L ${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT} -L ${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT} -L ${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT} -L ${DASH_WS_LOCAL_PORT}:${ROBOT_IP}:${DASH_WS_REMOTE_PORT} ${REMOTE_USER}@${REMOTE_HOST}"
-    fi
-    echo "Auto-update is not implemented for this path - it's a manual command, not a managed service."
-    ;;
+        # Plain Linux has no LaunchAgent and no Task Scheduler, so this path used
+        # to print a command and nothing else - no tunnel, no persistence, no
+        # health check - and then still report "Done / adb server should be
+        # reachable at localhost:5037", which was only true if the user had run
+        # the printed command themselves. Start the tunnel now for real, verify
+        # it below like every other platform, and say plainly which parts are
+        # still the user's job.
+        LINUX_LOG="${CONFIG_ROOT}/adb-tunnel-${SAFE_HOST}.log"
+        LINUX_FORWARDS=(
+            -L "127.0.0.1:${LOCAL_PORT}:localhost:${REMOTE_PORT}"
+            -L "${WEB_LOCAL_PORT}:${ROBOT_IP}:${WEB_REMOTE_PORT}"
+            -L "${PANELS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_REMOTE_PORT}"
+            -L "${PANELS_WS_LOCAL_PORT}:${ROBOT_IP}:${PANELS_WS_REMOTE_PORT}"
+            -L "${PEDRO_TUNER_LOCAL_PORT}:${ROBOT_IP}:${PEDRO_TUNER_REMOTE_PORT}"
+            -L "${PEDRO_TUNER_WS_LOCAL_PORT}:${ROBOT_IP}:${PEDRO_TUNER_WS_REMOTE_PORT}"
+            -L "${DASH_WS_LOCAL_PORT}:${ROBOT_IP}:${DASH_WS_REMOTE_PORT}"
+            -L "${HUB_8092_LOCAL_PORT}:${ROBOT_IP}:${HUB_8092_REMOTE_PORT}"
+        )
+        LINUX_OPTS=(-N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+        if [ "$AUTH_CHOICE" = "1" ]; then
+            LINUX_SSH=(ssh -i "$KEY" -o BatchMode=yes "${LINUX_OPTS[@]}" "${LINUX_FORWARDS[@]}" "${REMOTE_USER}@${REMOTE_HOST}")
+        else
+            LINUX_SSH=(sshpass -f "$PASSFILE" ssh "${LINUX_OPTS[@]}" "${LINUX_FORWARDS[@]}" "${REMOTE_USER}@${REMOTE_HOST}")
+        fi
+        # Detach properly: setsid so the tunnel is not in this terminal's
+        # process group (a Ctrl-C here would otherwise take the tunnel with it),
+        # nohup as the fallback on boxes without util-linux's setsid.
+        if command -v setsid >/dev/null 2>&1; then
+            setsid "${LINUX_SSH[@]}" >>"$LINUX_LOG" 2>&1 < /dev/null &
+        else
+            nohup "${LINUX_SSH[@]}" >>"$LINUX_LOG" 2>&1 < /dev/null &
+        fi
+        disown 2>/dev/null || true
+        important "Tunnel started (pid $!). Log: ${LINUX_LOG}"
+
+        # A ready-to-enable systemd --user unit, written but NOT enabled: which
+        # of these applies (linger, which key, key permissions) differs per
+        # distro, and silently enabling a unit that cannot log in unattended is
+        # worse than printing the two commands.
+        LINUX_UNIT="${CONFIG_ROOT}/adb-tunnel-${SAFE_HOST}.service"
+        {
+            echo "[Unit]"
+            echo "Description=Relay ADB tunnel to ${REMOTE_HOST}"
+            echo "After=network-online.target"
+            echo ""
+            echo "[Service]"
+            echo "Type=simple"
+            printf 'ExecStart='
+            printf '%q ' "${LINUX_SSH[@]}"
+            echo ""
+            echo "Restart=always"
+            echo "RestartSec=5"
+            echo ""
+            echo "[Install]"
+            echo "WantedBy=default.target"
+        } > "$LINUX_UNIT"
+        important "No auto-start on plain Linux yet. To persist this tunnel:"
+        important "  loginctl enable-linger \$USER      # so it runs without an open session"
+        important "  systemctl --user enable --now adb-tunnel-$(basename "$LINUX_UNIT" .service)"
+        echo "  (unit written to ${LINUX_UNIT}, adapted to your paths if needed)"
+        echo "Auto-update is not installed on this platform - 'git pull' and re-run"
+        echo "install.sh to pick up fixes."
+        ;;
 esac
 
 # --- Verify the tunnel actually came up before declaring success ---
@@ -1248,7 +1482,7 @@ if [ "$PLATFORM" = "mac" ]; then
     # first. Under --auto a failed health check exits 1, which makes the nightly
     # updater refuse to bump VERSION - so a filter that false-fails on a healthy
     # tunnel would silently stop all updates.
-    for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT" "$DASH_WS_LOCAL_PORT"; do
+    for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT" "$PEDRO_TUNER_LOCAL_PORT" "$PEDRO_TUNER_WS_LOCAL_PORT" "$DASH_WS_LOCAL_PORT" "$HUB_8092_LOCAL_PORT"; do
         [ "$TUNNEL_WAITING" = "1" ] && break
         if ! lsof -nP -iTCP:"$CHECK_PORT" -sTCP:LISTEN -Fc 2>/dev/null | grep -qx 'cssh'; then
             warning "port $CHECK_PORT is not held by the tunnel's ssh - that web tool will not reach the Control Hub."
@@ -1280,15 +1514,32 @@ elif [ "$PLATFORM" = "windows" ]; then
             HEALTH_OK=0
         fi
     fi
-    for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT" "$DASH_WS_LOCAL_PORT"; do
+    for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT" "$PEDRO_TUNER_LOCAL_PORT" "$PEDRO_TUNER_WS_LOCAL_PORT" "$DASH_WS_LOCAL_PORT" "$HUB_8092_LOCAL_PORT"; do
         [ "$TUNNEL_WAITING" = "1" ] && break
         if ! command -v netstat >/dev/null 2>&1 || ! netstat -ano 2>/dev/null | grep -q ":${CHECK_PORT} .*LISTENING"; then
             warning "port $CHECK_PORT is not listening - tunnel did not come up cleanly."
             HEALTH_OK=0
         fi
     done
+elif [ "$PLATFORM" = "linux" ]; then
+    # Same standard as macOS: the adb forward is declared on 127.0.0.1 only, so
+    # check that address specifically - an adb server that auto-spawned on the
+    # machine in the gap before our ssh started would otherwise pass.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        linux_port_held_by_ssh "$LOCAL_PORT" "127.0.0.1" && break
+        sleep 1
+    done
+    if ! linux_port_held_by_ssh "$LOCAL_PORT" "127.0.0.1"; then
+        warning "127.0.0.1:${LOCAL_PORT} is not held by the tunnel's ssh - adb clients on this machine will not reach the bridge."
+        HEALTH_OK=0
+    fi
+    for CHECK_PORT in "$WEB_LOCAL_PORT" "$PANELS_LOCAL_PORT" "$PANELS_WS_LOCAL_PORT" "$PEDRO_TUNER_LOCAL_PORT" "$PEDRO_TUNER_WS_LOCAL_PORT" "$DASH_WS_LOCAL_PORT" "$HUB_8092_LOCAL_PORT"; do
+        if ! linux_port_held_by_ssh "$CHECK_PORT"; then
+            warning "port $CHECK_PORT is not held by the tunnel's ssh - that web tool will not reach the Control Hub."
+            HEALTH_OK=0
+        fi
+    done
 fi
-# (linux path never starts a live process itself - nothing to health-check.)
 
 if [ "$AUTO" = "1" ]; then
     if [ "$HEALTH_OK" = "0" ]; then
@@ -1310,16 +1561,18 @@ else
         echo "adb server should be reachable at localhost:${LOCAL_PORT}."
         echo "Control Hub web interface (Program & Manage) should be reachable at http://localhost:${WEB_LOCAL_PORT}"
         echo "Panels dashboard (if used) should be reachable at http://localhost:${PANELS_LOCAL_PORT}"
+        echo "PedroPathing autotuner (if used) should be reachable at localhost:${PEDRO_TUNER_LOCAL_PORT}"
         echo "Quit and reopen Android Studio, confirm the device shows up before deploying."
     else
         warning "Setup ran, but the tunnel is NOT confirmed healthy"
         echo "One or more forwarded ports never came up. Likely cause: something else is"
-        echo "already bound to one of ${LOCAL_PORT}/${WEB_LOCAL_PORT}/${PANELS_LOCAL_PORT}/${PANELS_WS_LOCAL_PORT}/${DASH_WS_LOCAL_PORT} -"
+        echo "already bound to one of ${LOCAL_PORT}/${WEB_LOCAL_PORT}/${PANELS_LOCAL_PORT}/${PANELS_WS_LOCAL_PORT}/${PEDRO_TUNER_LOCAL_PORT}/${PEDRO_TUNER_WS_LOCAL_PORT}/${DASH_WS_LOCAL_PORT}/${HUB_8092_LOCAL_PORT} -"
         echo "ExitOnForwardFailure kills the WHOLE tunnel if even one forward fails, so the"
         echo "adb forward can be down even though only the web-interface port collided."
         case "$PLATFORM" in
             mac) echo "Check: /tmp/adbtunnel-${SAFE_HOST}.log and /tmp/adbtunnel-${SAFE_HOST}.err" ;;
             windows) echo "Check: ${LOG_FILE_WIN}" ;;
+            linux) echo "Check: ${LINUX_LOG}" ;;
         esac
         exit 1
     fi

@@ -51,9 +51,14 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"; }
 iface_is_managed() {
     # nmcli general status prints "GENERAL.STATE" per device; a managed device
     # reports "connected"/"connecting"/"disconnected"/"unavailable". An
-    # unmanaged device is simply absent from that list.
+    # unmanaged device is either simply absent from that list, or listed with
+    # STATE "unmanaged" on newer NetworkManager - treat both as unmanaged,
+    # because the difference between those two spellings decides whether the
+    # diagnosis below is "no profile can ever activate" or "the hub is off".
     nmcli -t -f DEVICE,STATE device status 2>/dev/null \
-        | awk -F: -v d="$WIFI_IFACE" '$1 == d { found = 1 } END { exit !found }'
+        | awk -F: -v d="$WIFI_IFACE" '
+            $1 == d { found = 1; if ($2 == "unmanaged") bad = 1 }
+            END { exit !(found && !bad) }'
 }
 
 wait_for_adb_server() {
@@ -131,9 +136,16 @@ wait_for_known_hub() {
     local waited=0 relog=0 visible uuid ssid
     while true; do
         PICKED_HUB=""
+        # NM only refreshes its AP list for an already-associated radio rarely,
+        # so a plain `nmcli dev wifi list` can keep reporting a stale list for
+        # minutes while the hub is sitting right there. Ask for a fresh scan
+        # first. The rescan call can be refused when one just ran - harmless,
+        # the list below still reads the latest results.
+        nmcli dev wifi rescan ifname "$WIFI_IFACE" >/dev/null 2>&1 || true
+        sleep 2
         # Exact line match against SSIDs, so one hub's name being a prefix of
         # another's (e.g. "6165-RC" and "6165-RC-B") cannot cause a false hit.
-        visible="$(nmcli --escape no -g SSID dev wifi list ifname "$WIFI_IFACE" 2>/dev/null)"
+        visible="$(nmcli --escape no -g SSID dev wifi list ifname "$WIFI_IFACE" --rescan no 2>/dev/null)"
         if [ -n "$visible" ]; then
             while read -r uuid; do
                 ssid="$(hub_ssid "$uuid")"
@@ -171,8 +183,8 @@ wait_for_known_hub() {
             elif [ -z "$(known_hub_uuids)" ]; then
                 log "ERROR: there is no Wi-Fi profile for ${WIFI_IFACE} at all. Re-run bridge/change-robot-wifi.sh."
             else
-                log "ERROR: the interface is managed, so no known Control Hub's Wi-Fi is broadcasting."
-                log "ERROR: check a Control Hub is powered on and not joined to another laptop."
+                log "ERROR: no known Control Hub was seen in any fresh scan on this radio. The hubs may be off or out of range,"
+                log "ERROR: or on a band this radio cannot see (the hub has moved between 2.4 and 5 GHz before)."
             fi
             log "ERROR: retrying from scratch."
             return 1
@@ -227,7 +239,18 @@ connect_adb() {
 }
 
 is_adb_alive() {
-    adb -H 127.0.0.1 -P "$ADB_PORT" -s "$DEVICE_IP:$DEVICE_PORT" get-state >/dev/null 2>&1
+    # `get-state` exits 0 for states that are emphatically not "ready":
+    # `offline` (radio link or hub rebooting) and `unauthorized` (ADB
+    # debugging prompt never accepted on the hub) both return success. Treating
+    # exit status alone as liveness therefore reported a healthy bridge while
+    # laptops could not deploy, and - worse - skipped the reconnect that would
+    # have fixed it. Compare the reported state to `device`, which is the only
+    # value that means adb can actually talk to the hub.
+    [ "$(adb -H 127.0.0.1 -P "$ADB_PORT" -s "$DEVICE_IP:$DEVICE_PORT" get-state 2>/dev/null)" = "device" ]
+}
+
+adb_state() {
+    adb -H 127.0.0.1 -P "$ADB_PORT" -s "$DEVICE_IP:$DEVICE_PORT" get-state 2>/dev/null
 }
 
 wait_for_adb_server
@@ -259,6 +282,14 @@ while true; do
         last_hub="$hub"
     fi
     if ! is_adb_alive; then
+        # Say what state the hub is actually in when there is one to say. An
+        # `unauthorized` hub is a different problem from a dead radio link, and
+        # the operator seeing "unauthorized" at 2am can fix it in ten seconds
+        # while "unreachable" sends them looking at Wi-Fi instead.
+        case "$(adb_state)" in
+            unauthorized) log "adb reports '${DEVICE_IP}:${DEVICE_PORT}' is unauthorized - accept the ADB debugging prompt on the Control Hub screen." ;;
+            offline)      log "adb reports '${DEVICE_IP}:${DEVICE_PORT}' is offline - the link is up but the hub is not answering." ;;
+        esac
         connect_adb || true
     else
         # Only log a healthy tick occasionally, not every 5 seconds, or the log

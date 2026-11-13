@@ -1,6 +1,8 @@
-# Relay + 
+# Relay
+**Upload code without joining the robot Wi-Fi, and without ADB hassles.**
 
-Relay lets more than one person on a FTC team use Android Studio with one REV Control Hub at
+
+Relay lets more than one person on an FTC team use Android Studio with one REV Control Hub at
 the same time while connected to your home WiFi.  Each laptop sees the Control Hub as an Android device and can
 deploy normally—without plugging in USB or joining the robot's Wi-Fi directly.
 
@@ -8,13 +10,14 @@ deploy normally—without plugging in USB or joining the robot's Wi-Fi directly.
 
 One small Linux computer, usually a Raspberry Pi, sits next to the robot. It
 joins the Control Hub's Wi-Fi and keeps one shared ADB connection open. Each
-laptop makes a secure SSH connection to that computer.
+laptop makes a secure SSH connection to that computer and forwards a local port
+to the shared server.
 
 ```text
 Android Studio on each laptop
             │ secure SSH tunnel
             ▼
-      Relay bridge (Raspberry Pi)
+      Relay bridge (e.g. Raspberry Pi)
             │ Control Hub Wi-Fi
             ▼
        REV Control Hub
@@ -23,6 +26,10 @@ Android Studio on each laptop
 This means several laptops can build and deploy to the same robot. Coordinate
 before deploying at the exact same moment, just as you would when sharing any
 robot.
+
+The bridge's ADB server listens on the bridge's own `localhost` only. Nothing on
+the shop or home network can reach it directly - laptops get to it through the
+SSH tunnel, and the tunnel is authenticated.
 
 ## What is Tailscale?
 
@@ -40,9 +47,10 @@ and the bridge are on the same network.
 You need:
 
 - A Linux bridge with `systemd`, NetworkManager, and an SSH server. A
-  Raspberry Pi is a common choice. Debian-family (`apt`) and Arch-family
-  (`pacman`: Arch, CachyOS, EndeavourOS, Manjaro, Arch Linux ARM) distros are
-  supported. The installer installs `iw` and `adb` for you if they are missing.
+  Raspberry Pi or a small x86_64 mini PC both work. Debian-family (`apt`) and
+  Arch-family (`pacman`: Arch, CachyOS, EndeavourOS, Manjaro, Arch Linux ARM)
+  distros are supported. The installer installs `iw` and `adb` for you if they
+  are missing.
 - The Control Hub's Wi-Fi name and password.
 - One network connection for the bridge besides the robot Wi-Fi (for example,
   home Wi-Fi or Ethernet). With Tailscale, it needs internet access.
@@ -72,6 +80,17 @@ The installer asks for:
    setup, or provide a fixed local-network address.
 3. The Wi-Fi adapter that should join the Control Hub.
 4. The Control Hub Wi-Fi name and password.
+5. Optionally, the port the shared ADB server should listen on (default
+   `5037`, which almost every installation keeps).
+
+At the end it prints the three values every laptop needs:
+
+```text
+On laptops, point setup at:
+  host: 100.x.y.z   user: your-bridge-user   port: 5037
+```
+
+Enter those same three values on each laptop.
 
 If you choose Tailscale and it is not installed, the installer can install it
 (from the distro package on Arch-family systems) and opens the sign-in step. When setup finishes, save the bridge host/IP and
@@ -122,7 +141,8 @@ cd Relay/laptop
 bash install.sh
 ```
 
-Enter the bridge host/IP and Linux username from Step 1. Choose **SSH key**
+Enter the bridge host/IP and Linux username from Step 1, plus the port it
+printed (press Enter for `5037`). Choose **SSH key**
 authentication when prompted. You enter the bridge password once so Relay can
 add the key; after that, the tunnel reconnects automatically and can receive
 safe nightly updates.
@@ -138,7 +158,14 @@ connect.
 Restart Android Studio when the installer finishes. The Control Hub should
 appear in the device selector. If it does not, first confirm that the laptop
 and bridge are both connected to Tailscale (or to the same LAN if using the
-local-IP option).
+local-IP option). If the installer cannot confirm the tunnel came up it says so
+and exits non-zero instead of reporting success - read what it printed.
+
+**Linux laptops:** the installer starts the tunnel and verifies it, but plain
+Linux has no built-in way to keep something running at logon, so persistence and
+automatic updates are not set up. The installer prints a `systemd --user` unit
+it has written for you, along with the two commands that enable it. Re-run
+`laptop/install.sh` after `git pull` to pick up updates.
 
 ### Optional: open the robot web tools from a laptop
 
@@ -149,6 +176,7 @@ After the laptop tunnel is running, open:
 | Control Hub Program & Manage | `http://localhost:8091` |
 | FTC Dashboard | `http://localhost:8091/dash` |
 | Panels | `http://localhost:8001` |
+| Pedro Pathing AutoTune | `http://localhost:10158` |
 
 Program & Manage and FTC Dashboard are the same web server on the hub
 (port 8080), so they share one forwarded address - if you're using FTC
@@ -158,21 +186,25 @@ FTC Dashboard's live data (op modes, telemetry, configuration) uses a second
 connection on port 8000, which Relay also forwards. Keep local port 8000 free:
 if another program is using it, the whole tunnel fails to start.
 
+Pedro Pathing AutoTune only allows one client at a time. If it reports that a
+tuning client is already connected, close any other AutoTune tab or device
+(including one on the robot's own Wi-Fi), or stop and re-init the AutoTune
+OpMode on the Driver Station, then reload the page.
+
 ## Change the robot Wi-Fi
 
 If you switch Control Hubs or change the hub's Wi-Fi name or password, you do
 not need to re-run the full installer. On the bridge, run:
 
 ```bash
-cd Relay/bridge
-sudo bash change-robot-wifi.sh
+sudo adb-forwarder-change-wifi.sh
 ```
 
 It asks only for the new Wi-Fi name and password. Press Enter at the name
-prompt to keep the current name and change only the password. Everything else
-stays as it was, and laptops need no changes. The old Wi-Fi profile is kept
-with auto-connect turned off, so you can switch back by running the script
-again.
+prompt to keep the current name and change only the password. Everything else -
+user, Wi-Fi adapter, adb port, reach address, services, updater - stays as it
+was, and laptops need no changes. The old Wi-Fi profile is kept with
+auto-connect turned off, so you can switch back by running the script again.
 
 Every hub the bridge has a Wi-Fi profile for is a fallback. If the configured
 hub is off, the bridge joins another known hub that is in range, and laptops
@@ -185,9 +217,16 @@ profile with `sudo nmcli connection delete "<hub name>"`.
 ## Updates
 
 Relay checks for updates overnight, around 3 AM. An update is applied only
-when the repository's `VERSION` is deliberately increased. Downloaded shell
-scripts are syntax-checked before Relay uses them; if a check fails, the
-current working installation remains in place.
+when the repository's `VERSION` is deliberately **increased** - a version that
+merely differs, including one that was reverted, is ignored so a mistake on
+`main` can never roll every machine backwards. Downloaded shell scripts are
+syntax-checked before Relay uses them; if a check fails, the current working
+installation remains in place.
+
+On the bridge, an applied update is also checked afterwards: the ADB unit must
+be active and its port bound, and if it is not, the previous install is restored
+and the version is not recorded - so a bad release retries the next night
+instead of breaking the bridge quietly.
 
 A laptop that can't reach its bridge (bridge off, Tailscale down, or a
 different network) still installs the update's laptop-side files, but does not
@@ -197,6 +236,23 @@ leaves everything as it was.
 
 Automatic laptop updates require SSH-key authentication. If you chose password
 authentication, re-run `laptop/install.sh` to update that laptop.
+
+To check for an update immediately instead of waiting for 3 AM, run:
+
+```bash
+bash laptop/check-for-updates.sh
+```
+
+It runs exactly the same updater the nightly job runs. It only exists for
+key-auth tunnels; a password-auth laptop has no updater installed.
+
+> **Automatic updates execute code from the repository as root on every bridge.**
+> Syntax-checking is not a security check. Keep the repository protected: two
+> factor authentication on every account that can push, branch protection on
+> `main`, no edits from the web UI, and a `VERSION` bump only in its own
+> reviewed commit. To take a bridge out of automatic updates without removing
+> the timer, write `manual` to `/etc/adb-forwarder/update-policy`; the nightly
+> job then only reports that an update exists.
 
 ## Troubleshooting
 
@@ -215,7 +271,7 @@ authentication, re-run `laptop/install.sh` to update that laptop.
   talked to a local server that had never seen the robot. Relay now clears an
   idle local server like that whenever the tunnel (re)starts and can reach the
   bridge. If it still happens, check the tunnel log for `adb-tunnel-guard`
-  messages.
+  messages - and capture the evidence listed below before re-running anything.
 - **ADB keeps disconnecting while the bridge is off, or while the laptop is on
   a Control Hub's own Wi-Fi or USB:** older laptop installs shut down every
   local ADB server each time the tunnel retried, which made adb and Android
@@ -234,7 +290,23 @@ authentication, re-run `laptop/install.sh` to update that laptop.
   so turn Wireless debugging off on it.
 - **Panels loads only a blank page:** make sure you are using the current
   laptop installer, which forwards both the Panels web page and its live-data
-  connection.
+  WebSocket on port 8002. This is the expected fix; it has not yet been
+  confirmed in a browser against a live Control Hub, so if the dashboard is
+  still blank, treat it as an open bug rather than a solved one.
+
+### Capturing evidence before re-running the installer
+
+Re-running the installer clears the tunnel and its processes, which destroys
+most of the evidence for why it failed. On macOS, run this first and keep the
+output:
+
+```bash
+bash laptop/diagnose.sh
+```
+
+It is read-only: it reports who owns port 5037, whether the tunnel agent is
+registered and running through its guard, what `adb devices` shows, the
+installed version, and the tail of the tunnel and updater logs.
 
 ## Logs
 
@@ -248,28 +320,63 @@ authentication, re-run `laptop/install.sh` to update that laptop.
 | Windows updater | `%APPDATA%\\adb-tunnel\\updater.log` |
 
 Logs are capped so they cannot fill the disk. The bridge log rotates weekly at
-5 MB, keeping 4 compressed generations. Laptop tunnel logs are trimmed to their
-newest 2.5 MB whenever they pass 5 MB - on macOS at install and each time the
-tunnel restarts, on Windows on every reconnect attempt. The updater logs grow
-by a few lines a night.
+5 MB, keeping 4 compressed generations - this depends on `logrotate` being
+installed: the installer writes a rotation policy when it is there and says so
+when it is not, but a bridge without `logrotate` has no size cap on
+`/var/log/adb-forwarder.log`. Laptop tunnel logs are trimmed to their newest
+2.5 MB whenever they pass 5 MB - on macOS at install and each time the tunnel
+restarts, on Windows on every reconnect attempt. The updater logs grow by a few
+lines a night.
 
-The bridge watchdog logs a line roughly every 5 seconds while it is working and
-says so explicitly when it cannot make progress. If the Control Hub's Wi-Fi never
+While it is working, the bridge watchdog logs every state change, every failed
+join, and a "Healthy" line about once an hour (not every 5 seconds). It says so
+explicitly when it cannot make progress. If the Control Hub's Wi-Fi never
 appears, it names the likely cause - most often that the chosen Wi-Fi adapter is
 not managed by NetworkManager, which happens when a netplan config claims other
 interfaces but never mentions that one. Fix that from a local console with a
 netplan drop-in, not over SSH on that interface, or the connection will drop.
+The bridge installer now refuses to configure an unmanaged adapter in the first
+place, unless you tell it to continue.
+
+The robot Wi-Fi profile is set to never provide a default route, so the Control
+Hub's DHCP gateway cannot become the bridge's route to the internet and take
+Tailscale and your SSH session down with it. Check with `ip route`.
 
 ## Current limitations
 
-- Windows persistence and automatic updates still need more real-hardware
-  verification.
+Read this before you rely on Relay in a workshop.
+
+- **The tunnel takes over local port 5037 on each laptop.** That is the port
+  Android Studio and every `adb` client use, so while Relay's tunnel is up, a
+  USB-connected phone and any running emulator disappear from Android Studio -
+  they are on a different adb server. To use a USB device, stop the Relay tunnel
+  first (macOS: `launchctl unload ~/Library/LaunchAgents/com.adbtunnel.<host>.plist`).
+- **There is one shared adb server, so `adb kill-server` is a team-wide event.**
+  Running it on any laptop - including Android Studio's "Restart adb", and
+  including a `adb` command typed over SSH on the bridge - stops the server every
+  other laptop is using. It comes back on its own, but the bridge also needs
+  about ten seconds to reconnect to the robot. Coordinate before doing it.
+- **Automatic updates run unreviewed code from the repository, as root, on
+  every registered bridge.** See the warning in [Updates](#updates).
+- **Windows persistence and automatic updates still need more real-hardware
+  verification.**
+- **Plain Linux laptops get a verified tunnel but no persistence and no
+  automatic updates** unless you enable the `systemd --user` unit the installer
+  prints.
+- **A laptop's `adb` client version must be able to talk to the bridge's adb
+  server.** Android Studio bundles its own `adb`; if a laptop reports a version
+  mismatch after an update, update that laptop's SDK platform-tools. Relay
+  expects Platform-Tools **36.0.0 or newer** and the laptop installer warns when
+  the `adb` on `PATH` is older.
 - Relay does not lock deployments. Multiple laptops can be connected, but teams
   should communicate before deploying at the same time.
 - Updates never change saved Wi-Fi credentials or site-specific network
   settings.
-- On aarch64 Debian-family bridges (e.g. Raspberry Pi OS), if the distro `adb` is older than
-  36.0.0, `bridge/install.sh` installs Google's x86_64 platform-tools under
-  `box64` (`/opt/adb-google`, libs in `/opt/box64-libs`, wrapper at
+- If the distro `adb` is older than 36.0.0, `bridge/install.sh` installs
+  Google's platform-tools (`/opt/adb-google`, wrapper at
   `/usr/local/bin/adb`) and points `adb-forwarder-server.service` at that
-  wrapper. Apt's `/usr/bin/adb` is left alone as a rollback path.
+  wrapper. On aarch64 (e.g. Raspberry Pi) it runs them under `box64` with libs
+  in `/opt/box64-libs`; on x86_64 it runs them natively. The distro's
+  `/usr/bin/adb` is left alone as a rollback path. The temporary `amd64`
+  package architecture the aarch64 path needs is removed again before the
+  installer finishes.
