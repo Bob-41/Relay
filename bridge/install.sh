@@ -754,8 +754,29 @@ else
         ip route get "$1" 2>/dev/null | awk '{ for (i = 1; i < NF; i++) if ($i == "dev") { print $(i + 1); exit } }'
     }
     DEFAULT_DEV="$(route_dev_for 1.1.1.1)"
+
+    # sudo's default env_reset strips SSH_CONNECTION, and `sudo bash install.sh`
+    # over SSH is the documented way to run this - so the obvious
+    # `${SSH_CONNECTION%% *}` aborts every normal install with "unbound
+    # variable" under `set -u`. Recover it from the invoking shell's /proc
+    # environment (we are root here, so it is readable) before falling back to
+    # empty, so the session-over-WIFI_IFACE guard keeps working.
+    find_ssh_connection() {
+        local pid="$PPID" value
+        while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; do
+            if [ -r "/proc/${pid}/environ" ]; then
+                value="$(tr '\0' '\n' < "/proc/${pid}/environ" 2>/dev/null \
+                    | awk -F= '$1 == "SSH_CONNECTION" { sub(/^SSH_CONNECTION=/, ""); print; exit }')"
+                [ -n "$value" ] && { printf '%s' "$value"; return 0; }
+            fi
+            pid="$(awk '{ print $4 }' "/proc/${pid}/stat" 2>/dev/null)"
+        done
+        return 1
+    }
+    SSH_CONNECTION_VALUE="${SSH_CONNECTION:-}"
+    [ -n "$SSH_CONNECTION_VALUE" ] || SSH_CONNECTION_VALUE="$(find_ssh_connection || true)"
     SESSION_DEV=""
-    SSH_PEER="${SSH_CONNECTION%% *}"
+    SSH_PEER="${SSH_CONNECTION_VALUE%% *}"
     [ -n "$SSH_PEER" ] && SESSION_DEV="$(route_dev_for "$SSH_PEER")"
     if [ "$DEFAULT_DEV" = "$WIFI_IFACE" ] || [ "$SESSION_DEV" = "$WIFI_IFACE" ]; then
         REASON=""
@@ -915,8 +936,10 @@ ${LOG_FILE} {
     missingok
     notifempty
     copytruncate
-    # `su user group` - logrotate needs both, and SERVICE_USER's own group is
-    # not guaranteed to exist or to be the right one.
+    # logrotate's su directive needs both a user and a group, and SERVICE_USER's
+    # own group is not guaranteed to exist or to be the right one. Keep this
+    # comment free of backticks: this is an unquoted heredoc, so a backtick
+    # pair here is executed as a command substitution at install time.
     su ${SERVICE_USER} $(id -gn "$SERVICE_USER" 2>/dev/null || echo root)
 }
 LOGROTATE_EOF
