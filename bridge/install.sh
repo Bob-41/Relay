@@ -477,6 +477,42 @@ if [ "$EUID" -ne 0 ]; then
     warning "Run this with sudo."
     exit 1
 fi
+
+# Stale-checkout guard. Re-running this from an old clone (a `git clone` that
+# failed because the folder already existed, a fork that stopped tracking
+# main) silently reinstalls whatever that old copy knew about, as root, and
+# nothing reports it. The nightly updater already refuses to roll a bridge
+# backwards; this gives the interactive path the same rule. Same block as
+# laptop/install.sh - keep both in sync. Skipped on --auto: the updater runs a
+# fresh download from a temp dir with no VERSION beside it, and has already
+# checked versions itself.
+relay_is_int() { case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+relay_stale_checkout_guard() {
+    local state_file="$1" checkout_version_file installed="" checkout="" latest=""
+    checkout_version_file="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/VERSION"
+    [ -f "$checkout_version_file" ] || return 0
+    checkout="$(tr -d '[:space:]' < "$checkout_version_file")"; checkout="${checkout#[vV]}"
+    relay_is_int "$checkout" || return 0
+    [ -f "$state_file" ] && installed="$(tr -d '[:space:]' < "$state_file")"; installed="${installed#[vV]}"
+    if relay_is_int "$installed" && [ "$checkout" -lt "$installed" ]; then
+        warning "This checkout is Relay VERSION ${checkout}, but this machine already has VERSION ${installed}."
+        warning "Installing from it would downgrade Relay and drop anything added since."
+        important "Update this folder first:  git -C \"$(dirname "$checkout_version_file")\" pull"
+        important "Or clone a fresh copy:   git clone https://github.com/6165-MSET-Cuttlefish/Relay.git Relay-new"
+        if [ "${RELAY_ALLOW_DOWNGRADE:-0}" != "1" ]; then
+            echo "Aborting. To downgrade on purpose, re-run with: sudo RELAY_ALLOW_DOWNGRADE=1 bash install.sh"
+            exit 1
+        fi
+        important "RELAY_ALLOW_DOWNGRADE=1 set - continuing with the older version."
+    fi
+    latest="$(curl -fsSL --max-time 5 "https://raw.githubusercontent.com/6165-MSET-Cuttlefish/Relay/main/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+    latest="${latest#[vV]}"
+    if relay_is_int "$latest" && [ "$checkout" -lt "$latest" ]; then
+        warning "This checkout is Relay VERSION ${checkout}; the latest on GitHub is ${latest}."
+        important "Run 'git pull' in this folder and re-run the installer to get the current version."
+    fi
+}
+[ "$AUTO" = "1" ] || relay_stale_checkout_guard "/etc/adb-forwarder/installed-version"
 if ! command -v iw >/dev/null 2>&1; then
     if [ "$PKG_MGR" != "none" ]; then
         important "Installing iw so Relay can show Wi-Fi adapter band support..."

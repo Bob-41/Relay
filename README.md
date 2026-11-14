@@ -73,6 +73,18 @@ cd Relay/bridge
 sudo bash install.sh
 ```
 
+**Already have a `Relay` folder?** Then `git clone` fails with "already
+exists" and the next commands run whatever old copy is in it. Update it
+instead, and make sure it points at this repository (not a fork):
+
+```bash
+git -C Relay remote set-url origin https://github.com/6165-MSET-Cuttlefish/Relay.git
+git -C Relay pull
+```
+
+The installers refuse to run from a checkout older than what the machine
+already has, and warn when a checkout is behind this repository's `main`.
+
 The installer asks for:
 
 1. The non-root Linux user that should run Relay.
@@ -138,6 +150,9 @@ git clone https://github.com/6165-MSET-Cuttlefish/Relay.git
 cd Relay/laptop
 bash install.sh
 ```
+
+If a `Relay` folder already exists, update it first the same way as on the
+bridge (see Step 1).
 
 Enter the bridge host/IP and Linux username from Step 1. Choose **SSH key**
 authentication when prompted. You enter the bridge password once so Relay can
